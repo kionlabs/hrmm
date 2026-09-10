@@ -68,6 +68,9 @@ export default function SchedulesPage() {
   // 대기방 주차 탭 선택 ('current': 이번 주, 'next': 다음 주)
   const [activePoolWeek, setActivePoolWeek] = useState<'current' | 'next'>('current');
 
+  // 대기방 상태 필터 ('waiting': 미배정 대기, 'assigned': 배정 완료)
+  const [poolFilter, setPoolFilter] = useState<'waiting' | 'assigned'>('waiting');
+
   // 모바일 터치 배정 상태 (선택된 대기 직원 ID)
   const [selectedStaffForAssign, setSelectedStaffForAssign] = useState<string | null>(null);
 
@@ -276,46 +279,59 @@ export default function SchedulesPage() {
     }
   };
 
-  // 주차별 대기 중인 인력 리스트 계산 (대기방 목록)
-  const getWaitingStaffsForWeek = (targetWeekMonday: string) => {
-    // 1. waiting_pools에 존재하는 해당 주차의 waiting 상태 직원들
-    const poolEntries = waitingPools.filter(
-      (p) => p.week_start_date === targetWeekMonday && p.status === 'waiting'
-    );
-
-    const poolStaffIds = new Set(poolEntries.map((p) => p.staff_id));
-    const poolStaffs = staffs.filter((s) => poolStaffIds.has(s.id));
-
-    // 2. 해당 주차에 아직 schedule이 하나도 없어서 자동으로 대기방에 포함되는 직원들
-    const assignedStaffIdsInWeek = new Set(
-      schedules
-        .filter((sch) => {
-          // 해당 주차 범위 내의 배정인지 체크
-          if (targetWeekMonday === currentWeekStart) {
-            return true;
-          }
-          return false;
-        })
-        .map((sch) => sch.staff_id)
-    );
-
-    // waiting_pools에 명시적으로 assigned 처리되지 않았거나 schedule이 없는 모든 미배정 직원
-    const explicitlyAssignedIds = new Set(
-      waitingPools
-        .filter((p) => p.week_start_date === targetWeekMonday && p.status === 'assigned')
-        .map((p) => p.staff_id)
-    );
-
-    const availableStaffs = staffs.filter((s) => {
-      if (explicitlyAssignedIds.has(s.id)) return false;
-      if (targetWeekMonday === currentWeekStart && assignedStaffIdsInWeek.has(s.id)) return false;
-      return true;
-    });
-
-    return availableStaffs;
+  // 특정 주차(월~일) 범위 계산
+  const getWeekRange = (mondayStr: string) => {
+    const mon = new Date(mondayStr);
+    const sun = new Date(mon);
+    sun.setDate(mon.getDate() + 6);
+    return {
+      startDate: formatDate(mon),
+      endDate: formatDate(sun),
+    };
   };
 
-  const activeWaitingStaffs = getWaitingStaffsForWeek(targetPoolWeekStart);
+  // 주차별 대기 중 인력 및 배정 완료 인력 상태 계산
+  const getStaffStatusForWeek = (targetWeekMonday: string) => {
+    const { startDate, endDate } = getWeekRange(targetWeekMonday);
+
+    // 해당 주차 범위 내에 스케줄이 배정된 직원 ID 및 배정 정보 맵
+    const assignedMap = new Map<string, { marketName: string; dateStr: string }>();
+
+    schedules.forEach((sch) => {
+      if (sch.schedule_date >= startDate && sch.schedule_date <= endDate) {
+        const market = markets.find((m) => m.id === sch.market_id);
+        assignedMap.set(sch.staff_id, {
+          marketName: market ? market.market_name : '마트 배정됨',
+          dateStr: sch.schedule_date.substring(5), // MM-DD
+        });
+      }
+    });
+
+    // waiting_pools 테이블 상에서 명시적으로 assigned로 지정된 직원도 포함
+    waitingPools.forEach((p) => {
+      if (p.week_start_date === targetWeekMonday && p.status === 'assigned') {
+        if (!assignedMap.has(p.staff_id)) {
+          assignedMap.set(p.staff_id, { marketName: '배정 완료', dateStr: '' });
+        }
+      }
+    });
+
+    // 미배정 대기 직원들
+    const waitingStaffs = staffs.filter((s) => !assignedMap.has(s.id));
+
+    // 배정 완료된 직원들
+    const assignedStaffs = staffs
+      .filter((s) => assignedMap.has(s.id))
+      .map((s) => ({
+        ...s,
+        assignmentInfo: assignedMap.get(s.id)!,
+      }));
+
+    return { waitingStaffs, assignedStaffs };
+  };
+
+  const { waitingStaffs: activeWaitingStaffs, assignedStaffs: activeAssignedStaffs } =
+    getStaffStatusForWeek(targetPoolWeekStart);
 
   // 대기방에서 인력 배정 처리 (DB 상태 업데이트)
   const updateWaitingPoolStatus = async (staffId: string, weekMonday: string, newStatus: 'waiting' | 'assigned') => {
@@ -766,7 +782,7 @@ export default function SchedulesPage() {
           <h1 className="text-2xl font-bold text-purple-600">실시간 스케줄러 & 주차별 대기방</h1>
           <div className="text-sm text-gray-500 mt-1 space-y-1">
             <p>💻 **PC:** 대기방 인력을 드래그하여 배정하거나, 캘린더 카드를 드래그해 이동합니다.</p>
-            <p>📱 **모바일:** 대기방 직원을 **선택(터치)** 후 원하는 칸을 **터치**하면 즉시 배정됩니다. 미배정 셀의 <span className="text-red-600 font-bold">🚨 결원</span> 표시를 클릭해 긴급 투입할 수 있습니다.</p>
+            <p>📱 **모바일:** 대기방 직원을 **선택(터치)** 후 원하는 칸을 **터치**하면 즉시 배정됩니다. 미배정 빈 셀의 <span className="text-red-600 font-bold">🚨 결원</span> 버튼을 누르면 긴급 인력을 빠른 투입할 수 있습니다.</p>
           </div>
         </div>
         <div className="flex items-center space-x-2">
@@ -818,17 +834,14 @@ export default function SchedulesPage() {
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
           {/* 왼쪽: 주차별 인력 대기방 (Waiting Pool) */}
           <div className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm flex flex-col h-[75vh]">
-            <div className="border-b pb-2 mb-3">
-              <div className="flex justify-between items-center mb-2">
+            <div className="border-b pb-3 mb-3 space-y-2">
+              <div className="flex justify-between items-center">
                 <h2 className="text-sm font-bold text-purple-900 flex items-center gap-1">
                   <span>🏊‍♂️</span> 주차별 인력 대기방
                 </h2>
-                <span className="text-[10px] bg-purple-100 text-purple-800 font-bold px-2 py-0.5 rounded-full">
-                  대기: {activeWaitingStaffs.length}명
-                </span>
               </div>
               
-              {/* 주차 선택 탭 */}
+              {/* 1차 주차 선택 탭 (이번 주 vs 다음 주) */}
               <div className="grid grid-cols-2 gap-1 bg-gray-100 p-1 rounded-md text-xs font-semibold">
                 <button
                   type="button"
@@ -849,47 +862,101 @@ export default function SchedulesPage() {
                   다음 주 대기방
                 </button>
               </div>
+
+              {/* 2차 인력 상태 구분 탭 (대기 중 vs 배정 완료) */}
+              <div className="flex border-b border-gray-200 pt-1 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setPoolFilter('waiting')}
+                  className={`flex-1 py-1 text-center font-bold border-b-2 transition-colors cursor-pointer ${
+                    poolFilter === 'waiting'
+                      ? 'border-purple-600 text-purple-700'
+                      : 'border-transparent text-gray-400 hover:text-gray-600'
+                  }`}
+                >
+                  대기 중 ({activeWaitingStaffs.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPoolFilter('assigned')}
+                  className={`flex-1 py-1 text-center font-bold border-b-2 transition-colors cursor-pointer ${
+                    poolFilter === 'assigned'
+                      ? 'border-green-600 text-green-700'
+                      : 'border-transparent text-gray-400 hover:text-gray-600'
+                  }`}
+                >
+                  배정 완료 ({activeAssignedStaffs.length})
+                </button>
+              </div>
             </div>
 
             <p className="text-[10px] text-gray-500 mb-3">
-              * 마트에 배정되면 대기방 목록에서 즉시 차감(소모)됩니다.
+              {poolFilter === 'waiting'
+                ? '* 마트에 배정되면 대기방 목록에서 차감되어 배정 완료로 이동합니다.'
+                : '* 이미 마트 스케줄에 장착된 인원 목록입니다.'}
             </p>
 
             <div className="flex-1 overflow-y-auto space-y-2 pr-1">
-              {activeWaitingStaffs.map((staff) => {
-                const isSelected = selectedStaffForAssign === staff.id;
-                return (
+              {poolFilter === 'waiting' &&
+                activeWaitingStaffs.map((staff) => {
+                  const isSelected = selectedStaffForAssign === staff.id;
+                  return (
+                    <div
+                      key={staff.id}
+                      draggable
+                      onDragStart={(e) => handleDragStartFromQueue(e, staff.id)}
+                      onTouchStart={(e) => handleTouchStart(e, 'new-staff', staff.id, staff.name)}
+                      onTouchMove={handleTouchMove}
+                      onTouchEnd={handleTouchEnd}
+                      onClick={() => handleStaffClick(staff.id)}
+                      style={{ touchAction: 'none' }}
+                      className={`p-3 rounded-lg shadow-sm cursor-grab transition-all flex flex-col justify-between select-none ${
+                        isSelected
+                          ? 'bg-purple-100 border-2 border-purple-600 ring-2 ring-purple-300 animate-pulse'
+                          : 'bg-purple-50 border border-purple-100 hover:bg-purple-100 active:cursor-grabbing'
+                      }`}
+                    >
+                      <span className="font-bold text-sm text-purple-900 flex justify-between items-center">
+                        <span>{staff.name}</span>
+                        {isSelected && (
+                          <span className="text-[10px] bg-purple-600 text-white px-1.5 py-0.5 rounded-full">
+                            선택됨
+                          </span>
+                        )}
+                      </span>
+                      <span className="text-[10px] text-purple-700 mt-1">{staff.contact}</span>
+                    </div>
+                  );
+                })}
+
+              {poolFilter === 'assigned' &&
+                activeAssignedStaffs.map((staff) => (
                   <div
                     key={staff.id}
-                    draggable
-                    onDragStart={(e) => handleDragStartFromQueue(e, staff.id)}
-                    onTouchStart={(e) => handleTouchStart(e, 'new-staff', staff.id, staff.name)}
-                    onTouchMove={handleTouchMove}
-                    onTouchEnd={handleTouchEnd}
-                    onClick={() => handleStaffClick(staff.id)}
-                    style={{ touchAction: 'none' }}
-                    className={`p-3 rounded-lg shadow-sm cursor-grab transition-all flex flex-col justify-between select-none ${
-                      isSelected
-                        ? 'bg-purple-100 border-2 border-purple-600 ring-2 ring-purple-300 animate-pulse'
-                        : 'bg-purple-50 border border-purple-100 hover:bg-purple-100 active:cursor-grabbing'
-                    }`}
+                    className="p-3 rounded-lg bg-green-50 border border-green-200 shadow-sm flex flex-col justify-between select-none"
                   >
-                    <span className="font-bold text-sm text-purple-900 flex justify-between items-center">
-                      <span>{staff.name}</span>
-                      {isSelected && (
-                        <span className="text-[10px] bg-purple-600 text-white px-1.5 py-0.5 rounded-full">
-                          선택됨
-                        </span>
-                      )}
+                    <div className="flex justify-between items-center">
+                      <span className="font-bold text-sm text-green-900">{staff.name}</span>
+                      <span className="text-[9px] bg-green-600 text-white px-1.5 py-0.5 rounded font-bold">
+                        ✓ 배정 완료
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-green-700 mt-1">
+                      {staff.assignmentInfo.marketName} ({staff.assignmentInfo.dateStr})
                     </span>
-                    <span className="text-[10px] text-purple-700 mt-1">{staff.contact}</span>
                   </div>
-                );
-              })}
-              {activeWaitingStaffs.length === 0 && (
+                ))}
+
+              {poolFilter === 'waiting' && activeWaitingStaffs.length === 0 && (
                 <div className="text-center py-10 bg-gray-50 rounded-lg border border-dashed border-gray-200">
                   <p className="text-xs text-gray-500 font-semibold mb-1">🎉 대기 인력 전원 배정 완료!</p>
-                  <p className="text-[10px] text-gray-400">모든 인력이 스케줄에 장착되었습니다.</p>
+                  <p className="text-[10px] text-gray-400">모든 인력이 이번 주 스케줄에 배치되었습니다.</p>
+                </div>
+              )}
+
+              {poolFilter === 'assigned' && activeAssignedStaffs.length === 0 && (
+                <div className="text-center py-10 bg-gray-50 rounded-lg border border-dashed border-gray-200">
+                  <p className="text-xs text-gray-400 font-semibold">아직 배정 완료된 인력이 없습니다.</p>
                 </div>
               )}
             </div>
@@ -905,14 +972,14 @@ export default function SchedulesPage() {
                 )
                 {selectedStaffForAssign && (
                   <span className="ml-3 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-purple-100 text-purple-800 animate-pulse">
-                    📍 원하는 달력 칸을 클릭하여 직원을 배정하세요
+                    📍 원하는 달력 빈 칸을 클릭하여 직원을 배정하세요
                   </span>
                 )}
               </h2>
               <div className="flex items-center space-x-2 text-[11px] text-gray-500">
                 <span className="inline-flex items-center gap-1">
                   <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping"></span>
-                  <span className="font-semibold text-red-600">🚨 결원 발생 (점멸 경고)</span>
+                  <span className="font-semibold text-red-600">🚨 결원 빈 셀 (점멸 경고)</span>
                 </span>
               </div>
             </div>
@@ -962,10 +1029,10 @@ export default function SchedulesPage() {
                           className={`border p-1.5 h-24 align-top transition-colors relative select-none ${
                             isVacant
                               ? 'border-2 border-red-300 bg-red-50/30 hover:bg-red-50/70 animate-pulse'
-                              : 'border-gray-200 hover:bg-purple-50/20'
-                          } ${selectedStaffForAssign ? 'cursor-pointer' : ''}`}
+                              : 'border-gray-200 bg-white hover:bg-purple-50/20'
+                          } ${selectedStaffForAssign && isVacant ? 'cursor-pointer' : ''}`}
                         >
-                          {/* 결원 알림 경고 뱃지 */}
+                          {/* 스케줄이 비어있는 셀에만 결원 알림 경고 뱃지 노출 */}
                           {isVacant && (
                             <div className="flex justify-between items-center mb-1">
                               <button
@@ -986,6 +1053,7 @@ export default function SchedulesPage() {
                             </div>
                           )}
 
+                          {/* 배정된 직원 스케줄 카드 목록 */}
                           <div className="space-y-1 overflow-y-auto max-h-full pb-1">
                             {cellSchedules.map((sch) => (
                               <div
@@ -1002,11 +1070,11 @@ export default function SchedulesPage() {
                                   handleOpenEditModal(sch);
                                 }}
                                 style={{ touchAction: 'none' }}
-                                className="group relative bg-white border border-gray-200 rounded p-1 shadow-sm flex flex-col justify-between cursor-grab hover:border-purple-400 active:cursor-grabbing transition-all select-none"
+                                className="group relative bg-white border border-gray-200 rounded p-1.5 shadow-sm flex flex-col justify-between cursor-grab hover:border-purple-500 active:cursor-grabbing transition-all select-none"
                                 title="드래그하여 일정 이동 / 클릭하여 상세 퀵 편집"
                               >
                                 <div className="flex justify-between items-start">
-                                  <span className="font-bold text-gray-800 text-[11px] truncate">
+                                  <span className="font-bold text-purple-950 text-[11px] truncate">
                                     {sch.staffs?.name || '미조인'}
                                   </span>
                                   <button
@@ -1015,13 +1083,13 @@ export default function SchedulesPage() {
                                       handleUnassign(sch.id);
                                     }}
                                     className="text-gray-400 hover:text-red-500 text-[10px] leading-none cursor-pointer"
-                                    title="배정 취소"
+                                    title="배정 취소 (대기방 환원)"
                                   >
                                     &times;
                                   </button>
                                 </div>
                                 <div className="flex justify-between items-center mt-1">
-                                  <span className="text-[9px] bg-purple-50 text-purple-700 px-1 rounded truncate">
+                                  <span className="text-[9px] bg-purple-100 text-purple-800 px-1 rounded font-medium truncate">
                                     {sch.business_type}
                                   </span>
                                   <span className="text-[8px] text-gray-400 opacity-60 group-hover:opacity-100 transition-opacity">
@@ -1087,7 +1155,7 @@ export default function SchedulesPage() {
 
             <div>
               <label className="block text-xs font-bold text-gray-700 mb-2">
-                대기방 인력 선택 ({activeWaitingStaffs.length}명 대기 중):
+                대기 중인 미배정 인력 선택 ({activeWaitingStaffs.length}명 대기 중):
               </label>
               <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
                 {activeWaitingStaffs.map((staff) => (
@@ -1227,7 +1295,7 @@ export default function SchedulesPage() {
                   disabled={saving}
                   className="px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 rounded text-xs font-semibold cursor-pointer transition-colors"
                 >
-                  일정 삭제
+                  일정 삭제 (대기방 환원)
                 </button>
 
                 <div className="flex space-x-2">
