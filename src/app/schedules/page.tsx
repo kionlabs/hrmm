@@ -446,7 +446,6 @@ export default function SchedulesPage() {
               market_id: marketId,
               schedule_date: dateStr,
               business_type: '땅콩빵',
-              status: 'assigned',
             },
           ]);
 
@@ -521,7 +520,6 @@ export default function SchedulesPage() {
             market_id: marketId,
             schedule_date: dateStr,
             business_type: '땅콩빵',
-            status: 'assigned',
           },
         ]);
 
@@ -563,7 +561,6 @@ export default function SchedulesPage() {
               market_id: marketId,
               schedule_date: dateStr,
               business_type: '땅콩빵',
-              status: 'assigned',
             },
           ]);
 
@@ -686,7 +683,6 @@ export default function SchedulesPage() {
             market_id: marketId,
             schedule_date: dateStr,
             business_type: '땅콩빵',
-            status: 'assigned',
           },
         ]);
 
