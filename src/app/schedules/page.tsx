@@ -209,7 +209,6 @@ export default function SchedulesPage() {
           schedule_date,
           business_type,
           weekly_revenue,
-          status,
           staffs (
             id,
             name,
