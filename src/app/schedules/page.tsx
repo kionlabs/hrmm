@@ -21,7 +21,16 @@ interface Schedule {
   schedule_date: string; // YYYY-MM-DD
   business_type: string;
   weekly_revenue?: number;
+  status?: string;
   staffs?: Staff; // Joined
+}
+
+interface WaitingPoolItem {
+  id: string;
+  staff_id: string;
+  week_start_date: string; // YYYY-MM-DD (월요일)
+  status: 'waiting' | 'assigned' | 'completed';
+  staffs?: Staff;
 }
 
 // PromiseLike(thenable)을 지원하는 5초 타임아웃 헬퍼 함수
@@ -51,9 +60,13 @@ export default function SchedulesPage() {
   const [staffs, setStaffs] = useState<Staff[]>([]);
   const [markets, setMarkets] = useState<Market[]>([]);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [waitingPools, setWaitingPools] = useState<WaitingPoolItem[]>([]);
   
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // 대기방 주차 탭 선택 ('current': 이번 주, 'next': 다음 주)
+  const [activePoolWeek, setActivePoolWeek] = useState<'current' | 'next'>('current');
 
   // 모바일 터치 배정 상태 (선택된 대기 직원 ID)
   const [selectedStaffForAssign, setSelectedStaffForAssign] = useState<string | null>(null);
@@ -77,10 +90,20 @@ export default function SchedulesPage() {
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  // 긴급 배정 팝업 상태 (결원 클릭 시)
+  const [emergencyTarget, setEmergencyTarget] = useState<{ marketId: string; dateStr: string; marketName: string } | null>(null);
+
+  // 날짜 포맷 (YYYY-MM-DD)
+  const formatDate = (date: Date): string => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
   // 주차 일자 계산
   useEffect(() => {
     const currentDay = baseDate.getDay();
-    // 월요일 기준으로 주차 시작 (일요일은 7번째 날로 처리)
     const distance = (currentDay === 0 ? 7 : currentDay) - 1;
     const monday = new Date(baseDate);
     monday.setDate(baseDate.getDate() - distance);
@@ -94,26 +117,43 @@ export default function SchedulesPage() {
     setWeekDays(days);
   }, [baseDate]);
 
+  // 현재 월요일 날짜 문자열
+  const currentWeekStart = weekDays.length > 0 ? formatDate(weekDays[0]) : '';
+  
+  // 다음 주 월요일 날짜 문자열
+  const getNextWeekStart = (): string => {
+    if (weekDays.length === 0) return '';
+    const nextMon = new Date(weekDays[0]);
+    nextMon.setDate(nextMon.getDate() + 7);
+    return formatDate(nextMon);
+  };
+  const nextWeekStart = getNextWeekStart();
+
+  // 현재 선택된 대기방 타겟 월요일 날짜
+  const targetPoolWeekStart = activePoolWeek === 'current' ? currentWeekStart : nextWeekStart;
+
   // 초기 데이터 로드 및 Realtime 채널 연동
   useEffect(() => {
     if (weekDays.length === 0) return;
 
     fetchInitialData();
 
-    // Supabase Realtime 구독 설정 ('hrmm' 스키마의 'schedules' 테이블 감시)
+    // Supabase Realtime 구독 설정 ('hrmm' 스키마의 'schedules' 및 'waiting_pools' 감시)
     const channel = supabase
       .channel('schema-db-changes')
       .on(
         'postgres_changes',
-        {
-          event: '*',
-          schema: 'hrmm',
-          table: 'schedules',
-        },
-        (payload) => {
-          console.log('Realtime 변경 감지:', payload);
-          // 실시간 일정 다시 로드
+        { event: '*', schema: 'hrmm', table: 'schedules' },
+        () => {
           fetchSchedulesOnly();
+          fetchWaitingPoolsOnly();
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'hrmm', table: 'waiting_pools' },
+        () => {
+          fetchWaitingPoolsOnly();
         }
       )
       .subscribe();
@@ -127,7 +167,6 @@ export default function SchedulesPage() {
     setLoading(true);
     setError(null);
     try {
-      // staffs, markets 로딩
       const staffsPromise = supabase.from('staffs').select('id, name, contact');
       const marketsPromise = supabase.from('markets').select('id, market_name');
 
@@ -139,10 +178,11 @@ export default function SchedulesPage() {
       if (staffsRes.error) throw staffsRes.error;
       if (marketsRes.error) throw marketsRes.error;
 
-      setStaffs(staffsRes.data || []);
+      const loadedStaffs = staffsRes.data || [];
+      setStaffs(loadedStaffs);
       setMarkets(marketsRes.data || []);
 
-      await fetchSchedulesOnly();
+      await Promise.all([fetchSchedulesOnly(), fetchWaitingPoolsOnly(loadedStaffs)]);
     } catch (err: any) {
       console.error('Error fetching initial data:', err);
       setError(err.message || '데이터를 불러오는 중 네트워크 에러가 발생했습니다.');
@@ -157,7 +197,6 @@ export default function SchedulesPage() {
     const endDateStr = formatDate(weekDays[6]);
 
     try {
-      // 해당 주차 범위 내의 스케줄과 직원 정보를 조인하여 가져옴
       const schedulesPromise = supabase
         .from('schedules')
         .select(`
@@ -167,6 +206,7 @@ export default function SchedulesPage() {
           schedule_date,
           business_type,
           weekly_revenue,
+          status,
           staffs (
             id,
             name,
@@ -179,7 +219,6 @@ export default function SchedulesPage() {
       const { data, error: schedulesError } = await fetchWithTimeout(schedulesPromise, 5000);
       if (schedulesError) throw schedulesError;
 
-      // Type-casting Supabase 조인 데이터
       const formattedSchedules = (data || []).map((s: any) => ({
         id: s.id,
         staff_id: s.staff_id,
@@ -187,6 +226,7 @@ export default function SchedulesPage() {
         schedule_date: s.schedule_date,
         business_type: s.business_type,
         weekly_revenue: s.weekly_revenue,
+        status: s.status || 'assigned',
         staffs: Array.isArray(s.staffs) ? s.staffs[0] : s.staffs,
       }));
 
@@ -196,12 +236,108 @@ export default function SchedulesPage() {
     }
   };
 
-  // 날짜 포맷 (YYYY-MM-DD)
-  const formatDate = (date: Date): string => {
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
+  const fetchWaitingPoolsOnly = async (currentStaffsList = staffs) => {
+    if (!currentWeekStart) return;
+
+    try {
+      const poolsPromise = supabase
+        .from('waiting_pools')
+        .select(`
+          id,
+          staff_id,
+          week_start_date,
+          status,
+          staffs (
+            id,
+            name,
+            contact
+          )
+        `);
+
+      const { data, error: poolsError } = await fetchWithTimeout(poolsPromise, 5000);
+      
+      // 테이블이 아직 없거나 에러가 난 경우 안전 처리
+      if (poolsError) {
+        console.warn('waiting_pools table notice:', poolsError.message);
+        return;
+      }
+
+      const formattedPools = (data || []).map((p: any) => ({
+        id: p.id,
+        staff_id: p.staff_id,
+        week_start_date: p.week_start_date,
+        status: p.status,
+        staffs: Array.isArray(p.staffs) ? p.staffs[0] : p.staffs,
+      }));
+
+      setWaitingPools(formattedPools);
+    } catch (err: any) {
+      console.error('Error fetching waiting pools:', err);
+    }
+  };
+
+  // 주차별 대기 중인 인력 리스트 계산 (대기방 목록)
+  const getWaitingStaffsForWeek = (targetWeekMonday: string) => {
+    // 1. waiting_pools에 존재하는 해당 주차의 waiting 상태 직원들
+    const poolEntries = waitingPools.filter(
+      (p) => p.week_start_date === targetWeekMonday && p.status === 'waiting'
+    );
+
+    const poolStaffIds = new Set(poolEntries.map((p) => p.staff_id));
+    const poolStaffs = staffs.filter((s) => poolStaffIds.has(s.id));
+
+    // 2. 해당 주차에 아직 schedule이 하나도 없어서 자동으로 대기방에 포함되는 직원들
+    const assignedStaffIdsInWeek = new Set(
+      schedules
+        .filter((sch) => {
+          // 해당 주차 범위 내의 배정인지 체크
+          if (targetWeekMonday === currentWeekStart) {
+            return true;
+          }
+          return false;
+        })
+        .map((sch) => sch.staff_id)
+    );
+
+    // waiting_pools에 명시적으로 assigned 처리되지 않았거나 schedule이 없는 모든 미배정 직원
+    const explicitlyAssignedIds = new Set(
+      waitingPools
+        .filter((p) => p.week_start_date === targetWeekMonday && p.status === 'assigned')
+        .map((p) => p.staff_id)
+    );
+
+    const availableStaffs = staffs.filter((s) => {
+      if (explicitlyAssignedIds.has(s.id)) return false;
+      if (targetWeekMonday === currentWeekStart && assignedStaffIdsInWeek.has(s.id)) return false;
+      return true;
+    });
+
+    return availableStaffs;
+  };
+
+  const activeWaitingStaffs = getWaitingStaffsForWeek(targetPoolWeekStart);
+
+  // 대기방에서 인력 배정 처리 (DB 상태 업데이트)
+  const updateWaitingPoolStatus = async (staffId: string, weekMonday: string, newStatus: 'waiting' | 'assigned') => {
+    try {
+      const upsertPromise = supabase
+        .from('waiting_pools')
+        .upsert(
+          [
+            {
+              staff_id: staffId,
+              week_start_date: weekMonday,
+              status: newStatus,
+            },
+          ],
+          { onConflict: 'staff_id,week_start_date' }
+        );
+
+      await fetchWithTimeout(upsertPromise, 5000);
+      fetchWaitingPoolsOnly();
+    } catch (err: any) {
+      console.warn('Failed to update waiting pool status:', err);
+    }
   };
 
   // 주차 이동 조작
@@ -221,7 +357,7 @@ export default function SchedulesPage() {
     setBaseDate(new Date());
   };
 
-  // 모바일/터치 클릭식 직원 선택 토글 (대체 배정 UX)
+  // 모바일/터치 클릭식 직원 선택 토글
   const handleStaffClick = (staffId: string) => {
     if (selectedStaffForAssign === staffId) {
       setSelectedStaffForAssign(null);
@@ -230,21 +366,21 @@ export default function SchedulesPage() {
     }
   };
 
-  // 대기 리스트의 직원 드래그 시작 이벤트 (PC 환경)
+  // 대기 리스트의 직원 드래그 시작 이벤트 (PC)
   const handleDragStartFromQueue = (e: React.DragEvent, staffId: string) => {
     e.dataTransfer.setData('drag-type', 'new-staff');
     e.dataTransfer.setData('staff-id', staffId);
     e.dataTransfer.effectAllowed = 'move';
   };
 
-  // 이미 배정된 일정 카드 드래그 시작 이벤트 (PC 환경)
+  // 이미 배정된 일정 카드 드래그 시작 이벤트 (PC)
   const handleDragStartFromBoard = (e: React.DragEvent, scheduleId: string) => {
     e.dataTransfer.setData('drag-type', 'existing-schedule');
     e.dataTransfer.setData('schedule-id', scheduleId);
     e.dataTransfer.effectAllowed = 'move';
   };
 
-  // --- 모바일 대응 모바일 크롬/사파리 실시간 터치 드래그 앤 드롭 구현부 ---
+  // 모바일 실시간 터치 드래그 앤 드롭 구현부
   const handleTouchStart = (
     e: React.TouchEvent,
     type: 'new-staff' | 'existing-schedule',
@@ -269,7 +405,6 @@ export default function SchedulesPage() {
     const x = touch.clientX;
     const y = touch.clientY;
 
-    // 터치가 멈춘 좌표 아래에 있는 td 셀 찾기
     const element = document.elementFromPoint(x, y);
     if (element) {
       const cell = element.closest('[data-cell-market-id]');
@@ -277,7 +412,6 @@ export default function SchedulesPage() {
         const marketId = cell.getAttribute('data-cell-market-id');
         const dateStr = cell.getAttribute('data-cell-date-str');
         if (marketId && dateStr) {
-          // 셀 드롭 처리 실행!
           await executeTouchDrop(touchDragInfo.type, touchDragInfo.id, marketId, dateStr);
         }
       }
@@ -312,12 +446,15 @@ export default function SchedulesPage() {
               market_id: marketId,
               schedule_date: dateStr,
               business_type: '땅콩빵',
+              status: 'assigned',
             },
           ]);
 
         const { error: insertError } = await fetchWithTimeout(insertPromise, 5000);
         if (insertError) throw insertError;
 
+        // 대기방 상태를 assigned로 전환하여 대기방에서 인력 실시간 차감
+        await updateWaitingPoolStatus(staffId, currentWeekStart, 'assigned');
         fetchSchedulesOnly();
       } catch (err: any) {
         console.error('Error assigning via touch drop:', err);
@@ -359,15 +496,13 @@ export default function SchedulesPage() {
       }
     }
   };
-  // --------------------------------------------------------------------
 
-  // 터치/클릭 배정 로직 (모바일 탭 배정 대응)
+  // 셀 클릭 배정 (터치 및 원클릭)
   const handleCellClick = async (marketId: string, dateStr: string) => {
-    if (!selectedStaffForAssign) return; // 선택된 직원이 없으면 일반 클릭은 패스
+    if (!selectedStaffForAssign) return;
 
     const staffId = selectedStaffForAssign;
 
-    // 이미 해당 마트 및 날짜에 해당 직원이 배정되었는지 확인
     const isAlreadyScheduled = schedules.some(
       (s) => s.staff_id === staffId && s.market_id === marketId && s.schedule_date === dateStr
     );
@@ -386,12 +521,14 @@ export default function SchedulesPage() {
             market_id: marketId,
             schedule_date: dateStr,
             business_type: '땅콩빵',
+            status: 'assigned',
           },
         ]);
 
       const { error: insertError } = await fetchWithTimeout(insertPromise, 5000);
       if (insertError) throw insertError;
 
+      await updateWaitingPoolStatus(staffId, currentWeekStart, 'assigned');
       setSelectedStaffForAssign(null);
       fetchSchedulesOnly();
     } catch (err: any) {
@@ -400,7 +537,7 @@ export default function SchedulesPage() {
     }
   };
 
-  // 드롭 이벤트 처리 (PC 환경 드래그 앤 드롭)
+  // 드롭 이벤트 처리 (PC 환경)
   const handleDrop = async (e: React.DragEvent, marketId: string, dateStr: string) => {
     e.preventDefault();
     const dragType = e.dataTransfer.getData('drag-type') || 'new-staff';
@@ -426,12 +563,14 @@ export default function SchedulesPage() {
               market_id: marketId,
               schedule_date: dateStr,
               business_type: '땅콩빵',
+              status: 'assigned',
             },
           ]);
 
         const { error: insertError } = await fetchWithTimeout(insertPromise, 5000);
         if (insertError) throw insertError;
 
+        await updateWaitingPoolStatus(staffId, currentWeekStart, 'assigned');
         fetchSchedulesOnly();
       } catch (err: any) {
         console.error('Error assigning schedule:', err);
@@ -476,9 +615,11 @@ export default function SchedulesPage() {
     }
   };
 
-  // 배정 취소 (스케줄 삭제)
+  // 배정 취소 (스케줄 삭제 및 대기방 인력 환원)
   const handleUnassign = async (scheduleId: string) => {
-    if (!window.confirm('이 스케줄 배정을 취소하시겠습니까?')) return;
+    if (!window.confirm('이 스케줄 배정을 취소하시겠습니까? (대기방으로 인력이 환원됩니다)')) return;
+
+    const targetSchedule = schedules.find((s) => s.id === scheduleId);
 
     try {
       const deletePromise = supabase
@@ -489,6 +630,10 @@ export default function SchedulesPage() {
       const { error: deleteError } = await fetchWithTimeout(deletePromise, 5000);
       if (deleteError) throw deleteError;
 
+      if (targetSchedule) {
+        await updateWaitingPoolStatus(targetSchedule.staff_id, currentWeekStart, 'waiting');
+      }
+
       fetchSchedulesOnly();
     } catch (err: any) {
       console.error('Error deleting schedule:', err);
@@ -498,7 +643,9 @@ export default function SchedulesPage() {
 
   // 상세 편집 모달에서 스케줄 삭제
   const handleUnassignFromModal = async (scheduleId: string) => {
-    if (!window.confirm('이 스케줄 배정을 취소하시겠습니까?')) return;
+    if (!window.confirm('이 스케줄 배정을 취소하시겠습니까? (대기방으로 인력이 환원됩니다)')) return;
+
+    const targetSchedule = schedules.find((s) => s.id === scheduleId);
 
     setSaving(true);
     try {
@@ -510,6 +657,10 @@ export default function SchedulesPage() {
       const { error: deleteError } = await fetchWithTimeout(deletePromise, 5000);
       if (deleteError) throw deleteError;
 
+      if (targetSchedule) {
+        await updateWaitingPoolStatus(targetSchedule.staff_id, currentWeekStart, 'waiting');
+      }
+
       setIsEditModalOpen(false);
       fetchSchedulesOnly();
     } catch (err: any) {
@@ -517,6 +668,37 @@ export default function SchedulesPage() {
       alert(`배정 취소 실패: ${err.message}`);
     } finally {
       setSaving(false);
+    }
+  };
+
+  // 긴급 인력 즉시 배정 액션
+  const handleQuickEmergencyAssign = async (staffId: string) => {
+    if (!emergencyTarget) return;
+
+    const { marketId, dateStr } = emergencyTarget;
+
+    try {
+      const insertPromise = supabase
+        .from('schedules')
+        .insert([
+          {
+            staff_id: staffId,
+            market_id: marketId,
+            schedule_date: dateStr,
+            business_type: '땅콩빵',
+            status: 'assigned',
+          },
+        ]);
+
+      const { error: insertError } = await fetchWithTimeout(insertPromise, 5000);
+      if (insertError) throw insertError;
+
+      await updateWaitingPoolStatus(staffId, currentWeekStart, 'assigned');
+      setEmergencyTarget(null);
+      fetchSchedulesOnly();
+    } catch (err: any) {
+      console.error('Emergency assignment error:', err);
+      alert(`긴급 배정 실패: ${err.message}`);
     }
   };
 
@@ -585,10 +767,10 @@ export default function SchedulesPage() {
     <div className="space-y-6">
       <div className="flex flex-col md:flex-row md:justify-between md:items-center border-b pb-4 gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-purple-600">실시간 스케줄러</h1>
+          <h1 className="text-2xl font-bold text-purple-600">실시간 스케줄러 & 주차별 대기방</h1>
           <div className="text-sm text-gray-500 mt-1 space-y-1">
-            <p>💻 **PC:** 직원을 캘린더 칸으로 드래그하여 배치하거나, 배정된 카드를 드래그하여 다른 날짜/마트로 바로 이동할 수 있습니다.</p>
-            <p>📱 **모바일:** 직원을 누르고 있으면 드래그하여 이동할 수 있습니다. 또는 대기실 직원을 **선택(터치)**한 뒤 원하는 칸을 **터치**하여 신속하게 배치할 수도 있습니다.</p>
+            <p>💻 **PC:** 대기방 인력을 드래그하여 배정하거나, 캘린더 카드를 드래그해 이동합니다.</p>
+            <p>📱 **모바일:** 대기방 직원을 **선택(터치)** 후 원하는 칸을 **터치**하면 즉시 배정됩니다. 미배정 셀의 <span className="text-red-600 font-bold">🚨 결원</span> 표시를 클릭해 긴급 투입할 수 있습니다.</p>
           </div>
         </div>
         <div className="flex items-center space-x-2">
@@ -638,14 +820,47 @@ export default function SchedulesPage() {
         </div>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-          {/* 왼쪽: 직원 대기 리스트 */}
-          <div className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm flex flex-col h-[70vh]">
-            <h2 className="text-sm font-bold text-gray-900 border-b pb-2 mb-3">직원 대기실</h2>
+          {/* 왼쪽: 주차별 인력 대기방 (Waiting Pool) */}
+          <div className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm flex flex-col h-[75vh]">
+            <div className="border-b pb-2 mb-3">
+              <div className="flex justify-between items-center mb-2">
+                <h2 className="text-sm font-bold text-purple-900 flex items-center gap-1">
+                  <span>🏊‍♂️</span> 주차별 인력 대기방
+                </h2>
+                <span className="text-[10px] bg-purple-100 text-purple-800 font-bold px-2 py-0.5 rounded-full">
+                  대기: {activeWaitingStaffs.length}명
+                </span>
+              </div>
+              
+              {/* 주차 선택 탭 */}
+              <div className="grid grid-cols-2 gap-1 bg-gray-100 p-1 rounded-md text-xs font-semibold">
+                <button
+                  type="button"
+                  onClick={() => setActivePoolWeek('current')}
+                  className={`py-1 rounded text-center transition-colors cursor-pointer ${
+                    activePoolWeek === 'current' ? 'bg-purple-600 text-white shadow-sm' : 'text-gray-600 hover:bg-gray-200'
+                  }`}
+                >
+                  이번 주 대기방
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActivePoolWeek('next')}
+                  className={`py-1 rounded text-center transition-colors cursor-pointer ${
+                    activePoolWeek === 'next' ? 'bg-purple-600 text-white shadow-sm' : 'text-gray-600 hover:bg-gray-200'
+                  }`}
+                >
+                  다음 주 대기방
+                </button>
+              </div>
+            </div>
+
             <p className="text-[10px] text-gray-500 mb-3">
-              직원을 선택(터치/클릭)하거나 마우스로 끌어서 배정해 주세요.
+              * 마트에 배정되면 대기방 목록에서 즉시 차감(소모)됩니다.
             </p>
+
             <div className="flex-1 overflow-y-auto space-y-2 pr-1">
-              {staffs.map((staff) => {
+              {activeWaitingStaffs.map((staff) => {
                 const isSelected = selectedStaffForAssign === staff.id;
                 return (
                   <div
@@ -656,7 +871,7 @@ export default function SchedulesPage() {
                     onTouchMove={handleTouchMove}
                     onTouchEnd={handleTouchEnd}
                     onClick={() => handleStaffClick(staff.id)}
-                    style={{ touchAction: 'none' }} // 모바일 터치 드래그 시 스크롤 차단
+                    style={{ touchAction: 'none' }}
                     className={`p-3 rounded-lg shadow-sm cursor-grab transition-all flex flex-col justify-between select-none ${
                       isSelected
                         ? 'bg-purple-100 border-2 border-purple-600 ring-2 ring-purple-300 animate-pulse'
@@ -665,31 +880,47 @@ export default function SchedulesPage() {
                   >
                     <span className="font-bold text-sm text-purple-900 flex justify-between items-center">
                       <span>{staff.name}</span>
-                      {isSelected && <span className="text-[10px] bg-purple-600 text-white px-1.5 py-0.5 rounded-full">선택됨</span>}
+                      {isSelected && (
+                        <span className="text-[10px] bg-purple-600 text-white px-1.5 py-0.5 rounded-full">
+                          선택됨
+                        </span>
+                      )}
                     </span>
                     <span className="text-[10px] text-purple-700 mt-1">{staff.contact}</span>
                   </div>
                 );
               })}
-              {staffs.length === 0 && (
-                <p className="text-xs text-gray-400 text-center py-8">등록된 직원이 없습니다.</p>
+              {activeWaitingStaffs.length === 0 && (
+                <div className="text-center py-10 bg-gray-50 rounded-lg border border-dashed border-gray-200">
+                  <p className="text-xs text-gray-500 font-semibold mb-1">🎉 대기 인력 전원 배정 완료!</p>
+                  <p className="text-[10px] text-gray-400">모든 인력이 스케줄에 장착되었습니다.</p>
+                </div>
               )}
             </div>
           </div>
 
-          {/* 오른쪽: 스케줄링 캘린더 그리드 */}
+          {/* 오른쪽: 스케줄링 캘린더 그리드 및 결원 알림 */}
           <div className="lg:col-span-3 bg-white p-4 rounded-lg border border-gray-200 shadow-sm overflow-x-auto">
-            <h2 className="text-sm font-bold text-gray-900 border-b pb-2 mb-3">
-              스케줄링 그리드 (
-              {weekDays.length > 0 &&
-                `${formatDate(weekDays[0])} ~ ${formatDate(weekDays[6])}`}
-              )
-              {selectedStaffForAssign && (
-                <span className="ml-3 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-purple-100 text-purple-800 animate-pulse">
-                  📍 원하는 달력 칸을 클릭하여 직원을 배정하세요
+            <div className="flex justify-between items-center border-b pb-2 mb-3">
+              <h2 className="text-sm font-bold text-gray-900">
+                스케줄링 그리드 (
+                {weekDays.length > 0 &&
+                  `${formatDate(weekDays[0])} ~ ${formatDate(weekDays[6])}`}
+                )
+                {selectedStaffForAssign && (
+                  <span className="ml-3 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-purple-100 text-purple-800 animate-pulse">
+                    📍 원하는 달력 칸을 클릭하여 직원을 배정하세요
+                  </span>
+                )}
+              </h2>
+              <div className="flex items-center space-x-2 text-[11px] text-gray-500">
+                <span className="inline-flex items-center gap-1">
+                  <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping"></span>
+                  <span className="font-semibold text-red-600">🚨 결원 발생 (점멸 경고)</span>
                 </span>
-              )}
-            </h2>
+              </div>
+            </div>
+
             <table className="w-full min-w-[800px] border-collapse border border-gray-200 table-fixed">
               <thead>
                 <tr className="bg-gray-50 text-gray-700 text-xs">
@@ -722,6 +953,7 @@ export default function SchedulesPage() {
                     {weekDays.map((day, idx) => {
                       const dateStr = formatDate(day);
                       const cellSchedules = getSchedulesForCell(market.id, dateStr);
+                      const isVacant = cellSchedules.length === 0;
 
                       return (
                         <td
@@ -731,24 +963,49 @@ export default function SchedulesPage() {
                           onDragOver={(e) => e.preventDefault()}
                           onDrop={(e) => handleDrop(e, market.id, dateStr)}
                           onClick={() => handleCellClick(market.id, dateStr)}
-                          className={`border border-gray-200 p-1.5 h-24 align-top hover:bg-purple-50/20 transition-colors relative ${
-                            selectedStaffForAssign ? 'cursor-pointer hover:bg-purple-50' : ''
-                          }`}
+                          className={`border p-1.5 h-24 align-top transition-colors relative select-none ${
+                            isVacant
+                              ? 'border-2 border-red-300 bg-red-50/30 hover:bg-red-50/70 animate-pulse'
+                              : 'border-gray-200 hover:bg-purple-50/20'
+                          } ${selectedStaffForAssign ? 'cursor-pointer' : ''}`}
                         >
+                          {/* 결원 알림 경고 뱃지 */}
+                          {isVacant && (
+                            <div className="flex justify-between items-center mb-1">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setEmergencyTarget({
+                                    marketId: market.id,
+                                    dateStr,
+                                    marketName: market.market_name,
+                                  });
+                                }}
+                                className="inline-flex items-center gap-1 text-[9px] bg-red-600 text-white px-1.5 py-0.5 rounded-full font-bold shadow-sm hover:bg-red-700 cursor-pointer animate-bounce"
+                                title="클릭하여 긴급 인력 투입"
+                              >
+                                <span>🚨 결원</span>
+                              </button>
+                            </div>
+                          )}
+
                           <div className="space-y-1 overflow-y-auto max-h-full pb-1">
                             {cellSchedules.map((sch) => (
                               <div
                                 key={sch.id}
                                 draggable
                                 onDragStart={(e) => handleDragStartFromBoard(e, sch.id)}
-                                onTouchStart={(e) => handleTouchStart(e, 'existing-schedule', sch.id, sch.staffs?.name || '미조인')}
+                                onTouchStart={(e) =>
+                                  handleTouchStart(e, 'existing-schedule', sch.id, sch.staffs?.name || '미조인')
+                                }
                                 onTouchMove={handleTouchMove}
                                 onTouchEnd={handleTouchEnd}
                                 onClick={(e) => {
-                                  e.stopPropagation(); // <td> 셀 클릭(배정) 방지
+                                  e.stopPropagation();
                                   handleOpenEditModal(sch);
                                 }}
-                                style={{ touchAction: 'none' }} // 모바일 터치 드래그 시 스크롤 차단
+                                style={{ touchAction: 'none' }}
                                 className="group relative bg-white border border-gray-200 rounded p-1 shadow-sm flex flex-col justify-between cursor-grab hover:border-purple-400 active:cursor-grabbing transition-all select-none"
                                 title="드래그하여 일정 이동 / 클릭하여 상세 퀵 편집"
                               >
@@ -758,7 +1015,7 @@ export default function SchedulesPage() {
                                   </span>
                                   <button
                                     onClick={(e) => {
-                                      e.stopPropagation(); // 카드 클릭 상세 열림 방지
+                                      e.stopPropagation();
                                       handleUnassign(sch.id);
                                     }}
                                     className="text-gray-400 hover:text-red-500 text-[10px] leading-none cursor-pointer"
@@ -808,6 +1065,67 @@ export default function SchedulesPage() {
           }}
         >
           {touchDragInfo.label}
+        </div>
+      )}
+
+      {/* 🚨 결원 긴급 인력 투입 팝업 모달 */}
+      {emergencyTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-lg max-w-sm w-full p-6 shadow-xl space-y-4 border-2 border-red-500">
+            <div className="flex justify-between items-center border-b pb-3">
+              <h2 className="text-base font-bold text-red-600 flex items-center gap-1">
+                <span>🚨</span> 긴급 인력 빠른 투입
+              </h2>
+              <button
+                onClick={() => setEmergencyTarget(null)}
+                className="text-gray-400 hover:text-gray-600 text-xl font-bold cursor-pointer"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="bg-red-50 p-3 rounded-md text-xs text-red-900 border border-red-100 space-y-1">
+              <p><span className="font-bold">대상 마트:</span> {emergencyTarget.marketName}</p>
+              <p><span className="font-bold">결원 일자:</span> {emergencyTarget.dateStr}</p>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-gray-700 mb-2">
+                대기방 인력 선택 ({activeWaitingStaffs.length}명 대기 중):
+              </label>
+              <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                {activeWaitingStaffs.map((staff) => (
+                  <button
+                    key={staff.id}
+                    type="button"
+                    onClick={() => handleQuickEmergencyAssign(staff.id)}
+                    className="w-full text-left p-2.5 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-md flex justify-between items-center transition-colors cursor-pointer"
+                  >
+                    <div>
+                      <span className="font-bold text-purple-900 text-xs">{staff.name}</span>
+                      <span className="text-[10px] text-purple-700 block">{staff.contact}</span>
+                    </div>
+                    <span className="text-xs bg-red-600 text-white font-bold px-2 py-1 rounded">
+                      투입 &rarr;
+                    </span>
+                  </button>
+                ))}
+                {activeWaitingStaffs.length === 0 && (
+                  <p className="text-xs text-gray-400 text-center py-6">대기 중인 인력이 없습니다.</p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-3 border-t">
+              <button
+                type="button"
+                onClick={() => setEmergencyTarget(null)}
+                className="px-3 py-1.5 border rounded text-xs text-gray-700 hover:bg-gray-50 cursor-pointer"
+              >
+                닫기
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

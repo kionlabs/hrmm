@@ -124,8 +124,9 @@ CREATE POLICY "Staffs can view their own profile" ON hrmm.staffs
    - *또는 SQL Editor에서 아래의 쿼리를 실행하여 직접 활성화할 수도 있습니다.*
 
 ```sql
--- hrmm.schedules 테이블에 대한 실시간 복제(Realtime) 강제 활성화 SQL
+-- hrmm.schedules 및 hrmm.waiting_pools 테이블에 대한 실시간 복제(Realtime) 강제 활성화 SQL
 alter publication supabase_realtime add table hrmm.schedules;
+alter publication supabase_realtime add table hrmm.waiting_pools;
 ```
 5. 설정이 완료되면, 한 브라우저 창에서 직원을 배정할 때 다른 창의 스케줄판도 즉각적으로 실시간 동기화가 이뤄집니다.
 
