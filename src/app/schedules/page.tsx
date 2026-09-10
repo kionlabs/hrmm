@@ -382,15 +382,21 @@ export default function SchedulesPage() {
     }
   };
 
-  // 대기 리스트의 직원 드래그 시작 이벤트 (PC)
+  // 대기 리스트의 직원 드래그 시작 이벤트 (PC - 크로스 브라우저 JSON 데이터 지원)
   const handleDragStartFromQueue = (e: React.DragEvent, staffId: string) => {
+    const payload = JSON.stringify({ type: 'new-staff', id: staffId });
+    e.dataTransfer.setData('text/plain', payload);
+    e.dataTransfer.setData('application/json', payload);
     e.dataTransfer.setData('drag-type', 'new-staff');
     e.dataTransfer.setData('staff-id', staffId);
     e.dataTransfer.effectAllowed = 'move';
   };
 
-  // 이미 배정된 일정 카드 드래그 시작 이벤트 (PC)
+  // 이미 배정된 일정 카드 드래그 시작 이벤트 (PC - 크로스 브라우저 JSON 데이터 지원)
   const handleDragStartFromBoard = (e: React.DragEvent, scheduleId: string) => {
+    const payload = JSON.stringify({ type: 'existing-schedule', id: scheduleId });
+    e.dataTransfer.setData('text/plain', payload);
+    e.dataTransfer.setData('application/json', payload);
     e.dataTransfer.setData('drag-type', 'existing-schedule');
     e.dataTransfer.setData('schedule-id', scheduleId);
     e.dataTransfer.effectAllowed = 'move';
@@ -551,15 +557,33 @@ export default function SchedulesPage() {
     }
   };
 
-  // 드롭 이벤트 처리 (PC 환경)
+  // 드롭 이벤트 처리 (PC 환경 - 크로스 브라우저 호환)
   const handleDrop = async (e: React.DragEvent, marketId: string, dateStr: string) => {
     e.preventDefault();
-    const dragType = e.dataTransfer.getData('drag-type') || 'new-staff';
+
+    let rawData = e.dataTransfer.getData('application/json') || e.dataTransfer.getData('text/plain');
+    let dragType = 'new-staff';
+    let targetId = '';
+
+    if (rawData) {
+      try {
+        const parsed = JSON.parse(rawData);
+        dragType = parsed.type || 'new-staff';
+        targetId = parsed.id || '';
+      } catch (err) {
+        targetId = rawData;
+      }
+    }
+
+    if (!targetId) {
+      dragType = e.dataTransfer.getData('drag-type') || 'new-staff';
+      targetId = e.dataTransfer.getData('staff-id') || e.dataTransfer.getData('schedule-id');
+    }
+
+    if (!targetId) return;
 
     if (dragType === 'new-staff') {
-      const staffId = e.dataTransfer.getData('staff-id') || e.dataTransfer.getData('text/plain');
-      if (!staffId) return;
-
+      const staffId = targetId;
       const isAlreadyScheduled = schedules.some(
         (s) => s.staff_id === staffId && s.market_id === marketId && s.schedule_date === dateStr
       );
@@ -590,9 +614,7 @@ export default function SchedulesPage() {
         alert(`배정 실패: ${err.message}`);
       }
     } else if (dragType === 'existing-schedule') {
-      const scheduleId = e.dataTransfer.getData('schedule-id');
-      if (!scheduleId) return;
-
+      const scheduleId = targetId;
       const targetSchedule = schedules.find((s) => s.id === scheduleId);
       if (!targetSchedule) return;
 
@@ -909,7 +931,6 @@ export default function SchedulesPage() {
                       onTouchMove={handleTouchMove}
                       onTouchEnd={handleTouchEnd}
                       onClick={() => handleStaffClick(staff.id)}
-                      style={{ touchAction: 'none' }}
                       className={`p-3 rounded-lg shadow-sm cursor-grab transition-all flex flex-col justify-between select-none ${
                         isSelected
                           ? 'bg-purple-100 border-2 border-purple-600 ring-2 ring-purple-300 animate-pulse'
@@ -1023,7 +1044,10 @@ export default function SchedulesPage() {
                           key={idx}
                           data-cell-market-id={market.id}
                           data-cell-date-str={dateStr}
-                          onDragOver={(e) => e.preventDefault()}
+                          onDragOver={(e) => {
+                            e.preventDefault();
+                            e.dataTransfer.dropEffect = 'move';
+                          }}
                           onDrop={(e) => handleDrop(e, market.id, dateStr)}
                           onClick={() => handleCellClick(market.id, dateStr)}
                           className={`border p-1.5 h-24 align-top transition-colors relative select-none ${
@@ -1069,7 +1093,6 @@ export default function SchedulesPage() {
                                   e.stopPropagation();
                                   handleOpenEditModal(sch);
                                 }}
-                                style={{ touchAction: 'none' }}
                                 className="group relative bg-white border border-gray-200 rounded p-1.5 shadow-sm flex flex-col justify-between cursor-grab hover:border-purple-500 active:cursor-grabbing transition-all select-none"
                                 title="드래그하여 일정 이동 / 클릭하여 상세 퀵 편집"
                               >
