@@ -21,10 +21,16 @@ interface Staff {
   created_at: string;
 }
 
+interface Market {
+  id: string;
+  market_name: string;
+}
+
 interface StaffScheduleItem {
   id: string;
   schedule_date: string;
   business_type: string;
+  market_id: string;
   market_name: string;
 }
 
@@ -54,6 +60,7 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
   const router = useRouter();
 
   const [staff, setStaff] = useState<Staff | null>(null);
+  const [markets, setMarkets] = useState<Market[]>([]);
   const [staffSchedules, setStaffSchedules] = useState<StaffScheduleItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -74,11 +81,22 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
   // 향후 6개월 대상 목록 (YYYY-MM)
   const [targetMonths, setTargetMonths] = useState<string[]>([]);
 
-  // 날짜 클릭 상세 모달 상태
-  const [selectedDayDetail, setSelectedDayDetail] = useState<{
-    dateStr: string;
-    schedules: StaffScheduleItem[];
-  } | null>(null);
+  // 일정 등록 & 기간 설정 모달 상태
+  const [isScheduleModalOpen, setIsScheduleModalOpen] = useState(false);
+  const [modalDateStr, setModalDateStr] = useState('');
+  const [modalStartDate, setModalStartDate] = useState('');
+  const [modalEndDate, setModalEndDate] = useState('');
+  const [modalMarketId, setModalMarketId] = useState('');
+  const [modalBusinessType, setModalBusinessType] = useState('땅콩빵');
+  const [modalSaving, setModalSaving] = useState(false);
+
+  // 날짜 포맷 (YYYY-MM-DD)
+  const formatDate = (date: Date): string => {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
 
   useEffect(() => {
     // 향후 6개월 목록 생성
@@ -106,7 +124,12 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
         .eq('id', id)
         .single();
 
-      // 2. 직원의 배정 스케줄 목록 조회 (마트 조인)
+      // 2. 전체 마트 목록 조회
+      const marketsPromise = supabase
+        .from('markets')
+        .select('id, market_name');
+
+      // 3. 직원의 배정 스케줄 목록 조회 (마트 조인)
       const schedulesPromise = supabase
         .from('schedules')
         .select(`
@@ -120,8 +143,9 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
         `)
         .eq('staff_id', id);
 
-      const [staffRes, schedulesRes] = await Promise.all([
+      const [staffRes, marketsRes, schedulesRes] = await Promise.all([
         fetchWithTimeout(staffPromise),
+        fetchWithTimeout(marketsPromise),
         fetchWithTimeout(schedulesPromise),
       ]);
 
@@ -139,12 +163,20 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
         setLongTermPlan(parsedPlan);
       }
 
+      if (marketsRes.data) {
+        setMarkets(marketsRes.data || []);
+        if (marketsRes.data.length > 0 && !modalMarketId) {
+          setModalMarketId(marketsRes.data[0].id);
+        }
+      }
+
       // 스케줄 데이터 파싱
       if (schedulesRes.data) {
         const formatted: StaffScheduleItem[] = (schedulesRes.data || []).map((s: any) => ({
           id: s.id,
           schedule_date: s.schedule_date,
           business_type: s.business_type,
+          market_id: s.market_id,
           market_name: Array.isArray(s.markets)
             ? s.markets[0]?.market_name || '마트'
             : s.markets?.market_name || '마트',
@@ -231,6 +263,79 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
     }
   };
 
+  // 달력 날짜 클릭 시 일정 등록 모달 열기
+  const handleDayCellClick = (dateStr: string) => {
+    setModalDateStr(dateStr);
+    setModalStartDate(dateStr);
+    setModalEndDate(dateStr);
+    if (markets.length > 0 && !modalMarketId) {
+      setModalMarketId(markets[0].id);
+    }
+    setIsScheduleModalOpen(true);
+  };
+
+  // 기간 기반 일정 일괄 배정 생성 (Batch Insert)
+  const handleCreateScheduleBatch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!modalMarketId || !modalStartDate || !modalEndDate) {
+      alert('마트와 기간(시작일/종료일)을 정확히 입력해 주세요.');
+      return;
+    }
+
+    const start = new Date(modalStartDate);
+    const end = new Date(modalEndDate);
+    if (start > end) {
+      alert('종료일은 시작일보다 이전일 수 없습니다.');
+      return;
+    }
+
+    // 시작일부터 종료일까지 매일 스케줄 행 생성
+    const insertRows = [];
+    const curr = new Date(start);
+    while (curr <= end) {
+      const dateStr = formatDate(curr);
+      insertRows.push({
+        staff_id: id,
+        market_id: modalMarketId,
+        schedule_date: dateStr,
+        business_type: modalBusinessType,
+      });
+      curr.setDate(curr.getDate() + 1);
+    }
+
+    setModalSaving(true);
+    try {
+      const insertPromise = supabase.from('schedules').insert(insertRows);
+      const { error: insertError } = await fetchWithTimeout(insertPromise, 5000);
+      if (insertError) throw insertError;
+
+      alert(`총 ${insertRows.length}일간의 마트 근무 일정이 정상적으로 등록 및 배정되었습니다!`);
+      setIsScheduleModalOpen(false);
+      fetchStaffData();
+    } catch (err: any) {
+      console.error('Batch schedule create error:', err);
+      alert(`일정 등록 실패: ${err.message}`);
+    } finally {
+      setModalSaving(false);
+    }
+  };
+
+  // 기존 일정 개별 삭제 (배정 취소)
+  const handleUnassignSchedule = async (scheduleId: string) => {
+    if (!window.confirm('이 마트 근무 스케줄을 삭제하시겠습니까?')) return;
+
+    try {
+      const deletePromise = supabase.from('schedules').delete().eq('id', scheduleId);
+      const { error: deleteError } = await fetchWithTimeout(deletePromise, 5000);
+      if (deleteError) throw deleteError;
+
+      fetchStaffData();
+    } catch (err: any) {
+      console.error('Error unassigning schedule:', err);
+      alert(`삭제 실패: ${err.message}`);
+    }
+  };
+
   // 달력 연월 이동
   const handlePrevMonth = () => {
     if (viewMonth === 0) {
@@ -263,11 +368,9 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
     const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
 
     const days = [];
-    // 이전 달 여백 채우기
     for (let i = 0; i < startDayOfWeek; i++) {
       days.push(null);
     }
-    // 현재 달 일자 채우기
     for (let d = 1; d <= daysInMonth; d++) {
       days.push(d);
     }
@@ -297,6 +400,9 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
     );
   }
 
+  // 선택한 날짜에 이미 배정된 스케줄 목록 (모달용)
+  const selectedDateSchedules = staffSchedules.filter((s) => s.schedule_date === modalDateStr);
+
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
       {/* 상단 헤더 영역 */}
@@ -307,7 +413,7 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
           </Link>
           <div className="flex items-center space-x-3">
             <h1 className="text-2xl font-extrabold text-blue-600">{staff.name} 프로필 & 일정 달력</h1>
-            <span className="text-xs bg-blue-100 text-blue-800 font-bold px-2.5 py-1 rounded-full">
+            <span className="text-xs bg-red-100 text-red-800 font-bold px-2.5 py-1 rounded-full">
               총 {staffSchedules.length}건 배정 완료
             </span>
           </div>
@@ -328,16 +434,23 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
         {/* [좌측 2단 영역 (lg:col-span-2)]: 시각적 달력 & 6개월 장기 일정 */}
         {/* ========================================================= */}
         <div className="lg:col-span-2 space-y-6">
-          {/* 1. 시각적 달력 (Interactive Calendar Grid) */}
+          {/* 1. 시각적 달력 (Interactive Calendar Grid - 색상 음영 구분 적용) */}
           <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
             <div className="flex flex-col sm:flex-row justify-between items-center border-b pb-4 mb-4 gap-3">
               <div>
                 <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
                   <span>📅</span> 근무 배정 및 일정 달력
                 </h2>
-                <p className="text-xs text-gray-500 mt-0.5">
-                  직원의 마트 배정 스케줄과 희망 일정을 시각적 달력으로 확인합니다.
-                </p>
+                <div className="flex items-center space-x-3 mt-1 text-xs">
+                  <span className="inline-flex items-center gap-1 font-semibold text-red-700">
+                    <span className="w-3 h-3 bg-red-100 border border-red-300 rounded"></span>
+                    일이 있는 일정 (빨간색 음영)
+                  </span>
+                  <span className="inline-flex items-center gap-1 font-semibold text-blue-700">
+                    <span className="w-3 h-3 bg-blue-50 border border-blue-200 rounded"></span>
+                    일이 없는 일정 (파란색 음영)
+                  </span>
+                </div>
               </div>
 
               {/* 월 조작 버튼 */}
@@ -369,6 +482,10 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
               </div>
             </div>
 
+            <p className="text-xs text-gray-500 mb-3">
+              💡 **날짜 칸을 클릭**하면 팝업에서 마트를 선택하고 일하는 기간을 설정해 일정을 등록할 수 있습니다.
+            </p>
+
             {/* 달력 그리드 테이블 */}
             <div className="overflow-x-auto">
               <div className="min-w-[600px]">
@@ -383,7 +500,7 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
                   <span className="text-blue-600">토</span>
                 </div>
 
-                {/* 날짜 셀 그리드 */}
+                {/* 날짜 셀 그리드 (일이 있는 날: 빨간 음영 / 일이 없는 날: 파란 음영) */}
                 <div className="grid grid-cols-7 gap-1 border-x border-b border-gray-200 p-1 bg-gray-100/50 rounded-b-lg">
                   {calendarDays.map((dayNum, idx) => {
                     if (dayNum === null) {
@@ -392,6 +509,7 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
 
                     const dateStr = `${viewYear}-${String(viewMonth + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
                     const daySchedules = staffSchedules.filter((s) => s.schedule_date === dateStr);
+                    const hasWork = daySchedules.length > 0;
                     const isToday = dateStr === `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
                     const dayOfWeekIdx = idx % 7;
                     const isSun = dayOfWeekIdx === 0;
@@ -400,20 +518,21 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
                     return (
                       <div
                         key={dateStr}
-                        onClick={() => {
-                          if (daySchedules.length > 0) {
-                            setSelectedDayDetail({ dateStr, schedules: daySchedules });
-                          }
-                        }}
-                        className={`h-24 p-1 bg-white rounded border flex flex-col justify-between transition-colors select-none ${
-                          isToday ? 'border-2 border-blue-600 ring-1 ring-blue-200 bg-blue-50/20' : 'border-gray-200 hover:border-blue-400'
-                        } ${daySchedules.length > 0 ? 'cursor-pointer' : ''}`}
+                        onClick={() => handleDayCellClick(dateStr)}
+                        className={`h-24 p-1.5 rounded border flex flex-col justify-between transition-all select-none cursor-pointer ${
+                          hasWork
+                            ? 'bg-red-50/80 border-2 border-red-300 hover:bg-red-100/90 shadow-2xs'
+                            : 'bg-blue-50/40 border border-blue-100 hover:bg-blue-100/50'
+                        } ${isToday ? 'ring-2 ring-blue-500 ring-offset-1 font-extrabold' : ''}`}
+                        title="클릭하여 마트 일정 배정 및 기간 설정"
                       >
                         <div className="flex justify-between items-center">
                           <span
                             className={`text-xs font-bold ${
                               isToday
                                 ? 'bg-blue-600 text-white rounded-full w-5 h-5 flex items-center justify-center'
+                                : hasWork
+                                ? 'text-red-700 font-extrabold'
                                 : isSun
                                 ? 'text-red-500'
                                 : isSat
@@ -423,23 +542,27 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
                           >
                             {dayNum}
                           </span>
-                          {daySchedules.length > 0 && (
-                            <span className="text-[9px] bg-blue-100 text-blue-800 font-bold px-1 rounded">
-                              {daySchedules.length}건
+                          {hasWork ? (
+                            <span className="text-[9px] bg-red-600 text-white font-bold px-1.5 py-0.5 rounded-full shadow-2xs">
+                              근무 {daySchedules.length}건
+                            </span>
+                          ) : (
+                            <span className="text-[8px] text-blue-400 opacity-60">
+                              +등록
                             </span>
                           )}
                         </div>
 
-                        {/* 배정된 마트 스케줄 뱃지 표시 */}
+                        {/* 배정된 마트 스케줄 뱃지 (빨간색 강조) */}
                         <div className="space-y-1 overflow-y-auto max-h-16 my-0.5">
                           {daySchedules.map((sch) => (
                             <div
                               key={sch.id}
-                              className="text-[9px] bg-blue-50 border border-blue-200 text-blue-900 rounded p-1 font-semibold leading-tight shadow-2xs truncate"
+                              className="text-[9px] bg-white border border-red-200 text-red-950 rounded p-1 font-bold leading-tight shadow-2xs truncate"
                               title={`${sch.market_name} (${sch.business_type})`}
                             >
                               🏪 {sch.market_name}
-                              <div className="text-[8px] text-blue-700 font-normal">{sch.business_type}</div>
+                              <div className="text-[8px] text-red-700 font-normal">{sch.business_type}</div>
                             </div>
                           ))}
                         </div>
@@ -576,40 +699,138 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
         </div>
       </form>
 
-      {/* 날짜 클릭 상세 스케줄 모달 */}
-      {selectedDayDetail && (
+      {/* ========================================================= */}
+      {/* 📅 마트 일정 배정 및 일하는 기간 설정 모달 팝업 */}
+      {/* ========================================================= */}
+      {isScheduleModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="bg-white rounded-xl max-w-sm w-full p-6 shadow-xl space-y-4 border-2 border-blue-500">
+          <div className="bg-white rounded-xl max-w-md w-full p-6 shadow-2xl space-y-4 border-2 border-blue-600 animate-in fade-in zoom-in duration-150">
             <div className="flex justify-between items-center border-b pb-3">
-              <h3 className="text-base font-bold text-blue-700">
-                {selectedDayDetail.dateStr} 배정 일정 상세
+              <h3 className="text-base font-bold text-blue-700 flex items-center gap-1.5">
+                <span>📅</span> [{staff.name}] 마트 일정 등록 & 기간 설정
               </h3>
               <button
-                onClick={() => setSelectedDayDetail(null)}
+                type="button"
+                onClick={() => setIsScheduleModalOpen(false)}
                 className="text-gray-400 hover:text-gray-600 text-xl font-bold cursor-pointer"
               >
                 &times;
               </button>
             </div>
 
-            <div className="space-y-2">
-              {selectedDayDetail.schedules.map((sch) => (
-                <div key={sch.id} className="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs space-y-1">
-                  <div className="font-bold text-blue-900 text-sm">🏪 {sch.market_name}</div>
-                  <div className="text-blue-700">업종: {sch.business_type}</div>
+            {/* 기존 배정 내역이 있을 경우 표시 */}
+            {selectedDateSchedules.length > 0 && (
+              <div className="bg-red-50 p-3 rounded-lg border border-red-200 space-y-2">
+                <p className="text-xs font-bold text-red-900">
+                  📍 선택한 날짜 ({modalDateStr}) 기존 배정 내역:
+                </p>
+                <div className="space-y-1.5">
+                  {selectedDateSchedules.map((sch) => (
+                    <div key={sch.id} className="flex justify-between items-center bg-white p-2 rounded border border-red-200 text-xs">
+                      <div>
+                        <span className="font-bold text-red-950">🏪 {sch.market_name}</span>
+                        <span className="ml-2 text-red-700">({sch.business_type})</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleUnassignSchedule(sch.id)}
+                        className="text-[10px] bg-red-100 hover:bg-red-200 text-red-800 px-2 py-0.5 rounded font-bold cursor-pointer"
+                      >
+                        배정 취소
+                      </button>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
+              </div>
+            )}
 
-            <div className="flex justify-end pt-2">
-              <button
-                type="button"
-                onClick={() => setSelectedDayDetail(null)}
-                className="px-3.5 py-1.5 border rounded-md text-xs font-semibold text-gray-700 hover:bg-gray-50 cursor-pointer"
-              >
-                닫기
-              </button>
-            </div>
+            {/* 새로운 근무 일정 배정 & 기간 설정 폼 */}
+            <form onSubmit={handleCreateScheduleBatch} className="space-y-3 pt-1">
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">
+                  배정 마트 선택
+                </label>
+                <select
+                  value={modalMarketId}
+                  onChange={(e) => setModalMarketId(e.target.value)}
+                  required
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500"
+                >
+                  {markets.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.market_name}
+                    </option>
+                  ))}
+                  {markets.length === 0 && <option value="">등록된 마트가 없습니다</option>}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">
+                  업종 선택
+                </label>
+                <select
+                  value={modalBusinessType}
+                  onChange={(e) => setModalBusinessType(e.target.value)}
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-xs focus:ring-1 focus:ring-blue-500"
+                >
+                  <option value="땅콩빵">땅콩빵</option>
+                  <option value="붕어빵">붕어빵</option>
+                  <option value="만두">만두</option>
+                  <option value="와플">와플</option>
+                  <option value="기타">기타</option>
+                </select>
+              </div>
+
+              {/* 일하는 기간 설정 (Start ~ End) */}
+              <div className="grid grid-cols-2 gap-3 pt-1">
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 mb-1">
+                    근무 시작일
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={modalStartDate}
+                    onChange={(e) => setModalStartDate(e.target.value)}
+                    className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 mb-1">
+                    근무 종료일
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={modalEndDate}
+                    onChange={(e) => setModalEndDate(e.target.value)}
+                    className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-xs focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+              </div>
+              <p className="text-[10px] text-gray-500">
+                * 시작일부터 종료일까지 매일 일괄 근무 일정이 자동 생성 및 배정됩니다.
+              </p>
+
+              <div className="flex justify-end space-x-2 pt-3 border-t">
+                <button
+                  type="button"
+                  onClick={() => setIsScheduleModalOpen(false)}
+                  disabled={modalSaving}
+                  className="px-3.5 py-1.5 border rounded-md text-xs font-semibold text-gray-700 hover:bg-gray-50 cursor-pointer"
+                >
+                  취소
+                </button>
+                <button
+                  type="submit"
+                  disabled={modalSaving}
+                  className="px-4 py-1.5 border border-transparent rounded-md text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 cursor-pointer shadow-sm"
+                >
+                  {modalSaving ? '등록 중...' : '일정 등록 및 일괄 배정'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
