@@ -655,6 +655,7 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
   }
 
   const weeklyAverageRevenue = Math.round(annualTotalRevenue / 52);
+  const dailyAverageRevenue = Math.round(annualTotalRevenue / 365);
 
   if (loading) {
     return (
@@ -1043,8 +1044,8 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
             </div>
           )}
 
-          {/* 상단 정산 요약 집계 카드 (Summary) */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {/* 상단 정산 요약 집계 카드 (Summary - 5개 카드 구성) */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
             {/* 1. 당월 누적 매출 */}
             <div className="bg-gradient-to-br from-blue-600 to-blue-700 text-white p-5 rounded-xl shadow-sm space-y-1">
               <div className="flex justify-between items-center text-blue-100 text-xs font-bold">
@@ -1077,7 +1078,7 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
             <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm space-y-1">
               <div className="flex justify-between items-center text-gray-500 text-xs font-bold">
                 <span>📊 주간 평균 매출</span>
-                <span className="bg-purple-100 text-purple-800 px-2 py-0.5 rounded text-[10px]">평균값</span>
+                <span className="bg-purple-100 text-purple-800 px-2 py-0.5 rounded text-[10px]">주간 평균</span>
               </div>
               <div className="text-2xl font-extrabold text-purple-900 pt-1">
                 {weeklyAverageRevenue.toLocaleString()}<span className="text-base font-normal ml-1">원/주</span>
@@ -1087,7 +1088,21 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
               </p>
             </div>
 
-            {/* 4. 최고 주간 매출 */}
+            {/* 4. 평균 일매출 */}
+            <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm space-y-1">
+              <div className="flex justify-between items-center text-gray-500 text-xs font-bold">
+                <span>📅 평균 일매출</span>
+                <span className="bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded text-[10px]">일일 평균</span>
+              </div>
+              <div className="text-2xl font-extrabold text-indigo-900 pt-1">
+                {dailyAverageRevenue.toLocaleString()}<span className="text-base font-normal ml-1">원/일</span>
+              </div>
+              <p className="text-[11px] text-gray-400 pt-0.5">
+                365일 연간 기준 1일 평균 발생 매출
+              </p>
+            </div>
+
+            {/* 5. 최고 주간 매출 */}
             <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm space-y-1">
               <div className="flex justify-between items-center text-gray-500 text-xs font-bold">
                 <span>🚩 최고 주간 매출</span>
