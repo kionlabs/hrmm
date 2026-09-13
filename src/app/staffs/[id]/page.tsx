@@ -28,7 +28,9 @@ interface Market {
 
 interface StaffScheduleItem {
   id: string;
-  schedule_date: string;
+  schedule_date?: string;
+  start_date?: string;
+  end_date?: string;
   business_type: string;
   market_id: string;
   market_name: string;
@@ -196,6 +198,8 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
         .select(`
           id,
           schedule_date,
+          start_date,
+          end_date,
           business_type,
           market_id,
           markets (
@@ -236,6 +240,8 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
         const formatted: StaffScheduleItem[] = (schedulesRes.data || []).map((s: any) => ({
           id: s.id,
           schedule_date: s.schedule_date,
+          start_date: s.start_date || s.schedule_date,
+          end_date: s.end_date || s.schedule_date || s.start_date,
           business_type: s.business_type,
           market_id: s.market_id,
           market_name: Array.isArray(s.markets)
@@ -395,30 +401,27 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
       return;
     }
 
-    const insertRows = [];
-    const curr = new Date(start);
-    while (curr <= end) {
-      const dateStr = formatDate(curr);
-      insertRows.push({
-        staff_id: id,
-        market_id: modalMarketId,
-        schedule_date: dateStr,
-        business_type: modalBusinessType,
-      });
-      curr.setDate(curr.getDate() + 1);
-    }
+    // 단 1개의 레코드(Row)로 기간 스케줄 저장 (start_date ~ end_date)
+    const scheduleRow = {
+      staff_id: id,
+      market_id: modalMarketId,
+      start_date: modalStartDate,
+      end_date: modalEndDate,
+      schedule_date: modalStartDate,
+      business_type: modalBusinessType,
+    };
 
     setModalSaving(true);
     try {
-      const insertPromise = supabase.from('schedules').insert(insertRows);
+      const insertPromise = supabase.from('schedules').insert([scheduleRow]);
       const { error: insertError } = await fetchWithTimeout(insertPromise, 5000);
       if (insertError) throw insertError;
 
-      alert(`총 ${insertRows.length}일간의 마트 근무 일정이 정상적으로 등록 및 배정되었습니다!`);
+      alert(`근무 기간 일정 (${modalStartDate} ~ ${modalEndDate}) 1건이 성공적으로 배정 등록되었습니다!`);
       setIsScheduleModalOpen(false);
       fetchStaffData();
     } catch (err: any) {
-      console.error('Batch schedule create error:', err);
+      console.error('Schedule create error:', err);
       alert(`일정 등록 실패: ${err.message}`);
     } finally {
       setModalSaving(false);
@@ -501,9 +504,11 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
     const amount = parseInt(amountStr, 10) || 0;
     const weekInfo = getWeekPeriodInfo(revenueYear, weekNum);
 
-    const matchedSchedule = staffSchedules.find(
-      (s) => s.schedule_date >= weekInfo.startStr && s.schedule_date <= weekInfo.endStr
-    );
+    const matchedSchedule = staffSchedules.find((s) => {
+      const start = s.start_date || s.schedule_date || '';
+      const end = s.end_date || s.schedule_date || start;
+      return start && end && !(end < weekInfo.startStr || start > weekInfo.endStr);
+    });
     const marketId = matchedSchedule ? matchedSchedule.market_id : null;
 
     setRevenueSavingWeek(weekNum);
@@ -581,9 +586,11 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
       const amount = parseInt(valStr, 10) || 0;
       const weekInfo = getWeekPeriodInfo(revenueYear, w);
 
-      const matchedSchedule = staffSchedules.find(
-        (s) => s.schedule_date >= weekInfo.startStr && s.schedule_date <= weekInfo.endStr
-      );
+      const matchedSchedule = staffSchedules.find((s) => {
+        const start = s.start_date || s.schedule_date || '';
+        const end = s.end_date || s.schedule_date || start;
+        return start && end && !(end < weekInfo.startStr || start > weekInfo.endStr);
+      });
 
       upsertRows.push({
         staff_id: id,
@@ -677,8 +684,12 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
     );
   }
 
-  // 선택한 날짜에 이미 배정된 스케줄 목록 (모달용)
-  const selectedDateSchedules = staffSchedules.filter((s) => s.schedule_date === modalDateStr);
+  // 선택한 날짜에 이미 배정된 스케줄 목록 (모달용 - 기간 범위 매칭)
+  const selectedDateSchedules = staffSchedules.filter((s) => {
+    const start = s.start_date || s.schedule_date;
+    const end = s.end_date || s.schedule_date || start;
+    return start && end && modalDateStr >= start && modalDateStr <= end;
+  });
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto pb-12">
@@ -820,7 +831,11 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
                       }
 
                       const dateStr = `${viewYear}-${String(viewMonth + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
-                      const daySchedules = staffSchedules.filter((s) => s.schedule_date === dateStr);
+                      const daySchedules = staffSchedules.filter((s) => {
+                        const start = s.start_date || s.schedule_date;
+                        const end = s.end_date || s.schedule_date || start;
+                        return start && end && dateStr >= start && dateStr <= end;
+                      });
                       const hasWork = daySchedules.length > 0;
                       const isToday = dateStr === `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
                       const dayOfWeekIdx = idx % 7;
@@ -1173,9 +1188,11 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
                     const weekInfo = getWeekPeriodInfo(revenueYear, weekNum);
                     
                     // 해당 주차 범위에 배정된 마트 찾기
-                    const matchedSchedules = staffSchedules.filter(
-                      (s) => s.schedule_date >= weekInfo.startStr && s.schedule_date <= weekInfo.endStr
-                    );
+                    const matchedSchedules = staffSchedules.filter((s) => {
+                      const start = s.start_date || s.schedule_date || '';
+                      const end = s.end_date || s.schedule_date || start;
+                      return start && end && !(end < weekInfo.startStr || start > weekInfo.endStr);
+                    });
 
                     // unique 마트명 추출
                     const matchedMarketNames = Array.from(
@@ -1293,7 +1310,10 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
                     <div key={sch.id} className="flex justify-between items-center bg-white p-2 rounded border border-red-200 text-xs">
                       <div>
                         <span className="font-bold text-red-950">🏪 {sch.market_name}</span>
-                        <span className="ml-2 text-red-700">({sch.business_type})</span>
+                        <span className="ml-2 text-red-700 font-semibold">({sch.business_type})</span>
+                        <div className="text-[10px] text-gray-500 font-mono mt-0.5">
+                          📅 기간: {sch.start_date || sch.schedule_date} ~ {sch.end_date || sch.schedule_date}
+                        </div>
                       </div>
                       <button
                         type="button"

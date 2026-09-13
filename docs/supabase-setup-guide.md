@@ -127,6 +127,11 @@ CREATE POLICY "Staffs can view their own profile" ON hrmm.staffs
 -- hrmm.schedules 및 hrmm.waiting_pools 테이블에 대한 실시간 복제(Realtime) 강제 활성화 SQL
 alter publication supabase_realtime add table hrmm.schedules;
 alter publication supabase_realtime add table hrmm.waiting_pools;
+
+-- hrmm.schedules 테이블 기간(Period) 단위 스키마 개편 SQL
+ALTER TABLE hrmm.schedules ADD COLUMN IF NOT EXISTS start_date DATE;
+ALTER TABLE hrmm.schedules ADD COLUMN IF NOT EXISTS end_date DATE;
+UPDATE hrmm.schedules SET start_date = schedule_date, end_date = schedule_date WHERE start_date IS NULL;
 ```
 5. 설정이 완료되면, 한 브라우저 창에서 직원을 배정할 때 다른 창의 스케줄판도 즉각적으로 실시간 동기화가 이뤄집니다.
 

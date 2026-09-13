@@ -134,6 +134,8 @@ export default function ShareSchedulerPage() {
           staff_id,
           market_id,
           schedule_date,
+          start_date,
+          end_date,
           business_type,
           weekly_revenue,
           staffs (
@@ -141,9 +143,7 @@ export default function ShareSchedulerPage() {
             name,
             contact
           )
-        `)
-        .gte('schedule_date', startDateStr)
-        .lte('schedule_date', endDateStr);
+        `);
 
       const { data, error: schedulesError } = await fetchWithTimeout(schedulesPromise, 5000);
       if (schedulesError) throw schedulesError;
@@ -153,6 +153,8 @@ export default function ShareSchedulerPage() {
         staff_id: s.staff_id,
         market_id: s.market_id,
         schedule_date: s.schedule_date,
+        start_date: s.start_date || s.schedule_date,
+        end_date: s.end_date || s.schedule_date || s.start_date,
         business_type: s.business_type,
         weekly_revenue: s.weekly_revenue,
         staffs: Array.isArray(s.staffs) ? s.staffs[0] : s.staffs,
@@ -188,7 +190,11 @@ export default function ShareSchedulerPage() {
   };
 
   const getSchedulesForCell = (marketId: string, dateStr: string) => {
-    return schedules.filter((s) => s.market_id === marketId && s.schedule_date === dateStr);
+    return schedules.filter((s: any) => {
+      const start = s.start_date || s.schedule_date;
+      const end = s.end_date || s.schedule_date || start;
+      return s.market_id === marketId && start && end && dateStr >= start && dateStr <= end;
+    });
   };
 
   return (
