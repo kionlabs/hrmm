@@ -130,3 +130,32 @@ alter publication supabase_realtime add table hrmm.waiting_pools;
 ```
 5. 설정이 완료되면, 한 브라우저 창에서 직원을 배정할 때 다른 창의 스케줄판도 즉각적으로 실시간 동기화가 이뤄집니다.
 
+---
+
+## 4. 52주 매출 관리 테이블 (`hrmm.revenues`) 설정
+
+직원별 52주 매출 데이터 저장 및 정산을 위해 Supabase SQL Editor에서 아래 쿼리를 실행해 테이블을 생성합니다.
+
+```sql
+CREATE TABLE IF NOT EXISTS hrmm.revenues (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    staff_id UUID NOT NULL REFERENCES hrmm.staffs(id) ON DELETE CASCADE,
+    market_id UUID REFERENCES hrmm.markets(id) ON DELETE SET NULL,
+    year INTEGER NOT NULL,
+    week_number INTEGER NOT NULL CHECK (week_number BETWEEN 1 AND 53),
+    period_text TEXT,
+    revenue_amount INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT unique_staff_year_week UNIQUE (staff_id, year, week_number)
+);
+
+-- RLS 활성화 및 접근 권한 설정
+ALTER TABLE hrmm.revenues ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow public read access to revenues" ON hrmm.revenues
+    FOR SELECT USING (true);
+
+CREATE POLICY "Allow public write access to revenues" ON hrmm.revenues
+    FOR ALL USING (true);
+```

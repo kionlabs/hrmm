@@ -34,6 +34,16 @@ interface StaffScheduleItem {
   market_name: string;
 }
 
+interface StaffRevenueItem {
+  id?: string;
+  staff_id: string;
+  market_id?: string | null;
+  year: number;
+  week_number: number;
+  period_text?: string;
+  revenue_amount: number;
+}
+
 // PromiseLike 지원 5초 타임아웃 헬퍼
 const fetchWithTimeout = async <T,>(promise: PromiseLike<T>, timeoutMs = 5000): Promise<T> => {
   return new Promise((resolve, reject) => {
@@ -54,14 +64,39 @@ const fetchWithTimeout = async <T,>(promise: PromiseLike<T>, timeoutMs = 5000): 
   });
 };
 
+// 52주차별 기간 정보 계산 헬퍼 (연도 1월 1일부터 7일간 계산)
+const getWeekPeriodInfo = (year: number, weekNum: number) => {
+  const startDate = new Date(year, 0, 1 + (weekNum - 1) * 7);
+  const endDate = new Date(year, 0, (weekNum - 1) * 7 + 7);
+
+  const startStr = `${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, '0')}-${String(startDate.getDate()).padStart(2, '0')}`;
+  const endStr = `${endDate.getFullYear()}-${String(endDate.getMonth() + 1).padStart(2, '0')}-${String(endDate.getDate()).padStart(2, '0')}`;
+
+  const periodText = `${String(startDate.getMonth() + 1).padStart(2, '0')}.${String(startDate.getDate()).padStart(2, '0')} ~ ${String(endDate.getMonth() + 1).padStart(2, '0')}.${String(endDate.getDate()).padStart(2, '0')}`;
+
+  return {
+    startDate,
+    endDate,
+    startStr,
+    endStr,
+    periodText,
+    startMonth: startDate.getMonth() + 1,
+    endMonth: endDate.getMonth() + 1,
+  };
+};
+
 export default function StaffDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const resolvedParams = use(params);
   const id = resolvedParams.id;
   const router = useRouter();
 
+  // 상단 탭 상태 ('profile' | 'revenue')
+  const [activeTab, setActiveTab] = useState<'profile' | 'revenue'>('profile');
+
   const [staff, setStaff] = useState<Staff | null>(null);
   const [markets, setMarkets] = useState<Market[]>([]);
   const [staffSchedules, setStaffSchedules] = useState<StaffScheduleItem[]>([]);
+  const [revenues, setRevenues] = useState<StaffRevenueItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -90,6 +125,14 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
   const [modalBusinessType, setModalBusinessType] = useState('땅콩빵');
   const [modalSaving, setModalSaving] = useState(false);
 
+  // ==========================================
+  // 💰 매출 관리 (52주 정산) 상태
+  // ==========================================
+  const [revenueYear, setRevenueYear] = useState<number>(today.getFullYear());
+  const [revenueInputs, setRevenueInputs] = useState<Record<number, string>>({});
+  const [revenueSavingWeek, setRevenueSavingWeek] = useState<number | null>(null);
+  const [revenueSavingAll, setRevenueSavingAll] = useState<boolean>(false);
+
   // 날짜 포맷 (YYYY-MM-DD)
   const formatDate = (date: Date): string => {
     const y = date.getFullYear();
@@ -111,7 +154,7 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
     setTargetMonths(months);
 
     fetchStaffData();
-  }, [id]);
+  }, [id, revenueYear]);
 
   const fetchStaffData = async () => {
     setLoading(true);
@@ -182,6 +225,27 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
             : s.markets?.market_name || '마트',
         }));
         setStaffSchedules(formatted);
+      }
+
+      // 4. 52주 매출 데이터 조회 (실패 시 예외 처리)
+      try {
+        const revenuesPromise = supabase
+          .from('revenues')
+          .select('*')
+          .eq('staff_id', id)
+          .eq('year', revenueYear);
+
+        const revRes = await fetchWithTimeout(revenuesPromise, 4000);
+        if (revRes.data) {
+          setRevenues(revRes.data);
+          const inputMap: Record<number, string> = {};
+          revRes.data.forEach((r: StaffRevenueItem) => {
+            inputMap[r.week_number] = String(r.revenue_amount || 0);
+          });
+          setRevenueInputs(inputMap);
+        }
+      } catch (revErr) {
+        console.warn('Revenues table query skipped or table not created yet:', revErr);
       }
     } catch (err: any) {
       console.error('Error fetching staff detail:', err);
@@ -289,7 +353,6 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
       return;
     }
 
-    // 시작일부터 종료일까지 매일 스케줄 행 생성
     const insertRows = [];
     const curr = new Date(start);
     while (curr <= end) {
@@ -380,11 +443,158 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
   const calendarDays = getCalendarDays();
   const currentViewMonthStr = `${viewYear}-${String(viewMonth + 1).padStart(2, '0')}`;
 
+  // ==========================================
+  // 💰 매출 저장 & 집계 핸들러
+  // ==========================================
+  const handleRevenueInputChange = (weekNum: number, value: string) => {
+    const sanitized = value.replace(/[^0-9]/g, '');
+    setRevenueInputs((prev) => ({
+      ...prev,
+      [weekNum]: sanitized,
+    }));
+  };
+
+  const handleSaveWeekRevenue = async (weekNum: number) => {
+    const amountStr = revenueInputs[weekNum] || '0';
+    const amount = parseInt(amountStr, 10) || 0;
+    const weekInfo = getWeekPeriodInfo(revenueYear, weekNum);
+
+    // 해당 주차 범위 내 배정된 마트 확인
+    const matchedSchedule = staffSchedules.find(
+      (s) => s.schedule_date >= weekInfo.startStr && s.schedule_date <= weekInfo.endStr
+    );
+    const marketId = matchedSchedule ? matchedSchedule.market_id : null;
+
+    setRevenueSavingWeek(weekNum);
+    try {
+      const upsertPromise = supabase.from('revenues').upsert(
+        {
+          staff_id: id,
+          year: revenueYear,
+          week_number: weekNum,
+          period_text: weekInfo.periodText,
+          revenue_amount: amount,
+          market_id: marketId,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'staff_id,year,week_number' }
+      );
+
+      const { error: upsertError } = await fetchWithTimeout(upsertPromise, 5000);
+      if (upsertError) throw upsertError;
+
+      // 로컬 state 동기화
+      setRevenues((prev) => {
+        const existingIdx = prev.findIndex(
+          (r) => r.year === revenueYear && r.week_number === weekNum
+        );
+        const newItem: StaffRevenueItem = {
+          staff_id: id,
+          year: revenueYear,
+          week_number: weekNum,
+          period_text: weekInfo.periodText,
+          revenue_amount: amount,
+          market_id: marketId,
+        };
+        if (existingIdx >= 0) {
+          const next = [...prev];
+          next[existingIdx] = newItem;
+          return next;
+        }
+        return [...prev, newItem];
+      });
+
+      alert(`${weekNum}주차 매출(${amount.toLocaleString()}원)이 저장되었습니다.`);
+    } catch (err: any) {
+      console.error('Save revenue error:', err);
+      alert(`매출 저장 실패: ${err.message}\n\n(※ Supabase에 hrmm.revenues 테이블이 생성되어 있는지 확인해주세요)`);
+    } finally {
+      setRevenueSavingWeek(null);
+    }
+  };
+
+  // 52주 전체 일괄 저장
+  const handleSaveAllRevenues = async () => {
+    setRevenueSavingAll(true);
+    try {
+      const upsertRows = [];
+      for (let w = 1; w <= 52; w++) {
+        const valStr = revenueInputs[w] || '0';
+        const amount = parseInt(valStr, 10) || 0;
+        const weekInfo = getWeekPeriodInfo(revenueYear, w);
+
+        const matchedSchedule = staffSchedules.find(
+          (s) => s.schedule_date >= weekInfo.startStr && s.schedule_date <= weekInfo.endStr
+        );
+
+        upsertRows.push({
+          staff_id: id,
+          year: revenueYear,
+          week_number: w,
+          period_text: weekInfo.periodText,
+          revenue_amount: amount,
+          market_id: matchedSchedule ? matchedSchedule.market_id : null,
+          updated_at: new Date().toISOString(),
+        });
+      }
+
+      const upsertPromise = supabase.from('revenues').upsert(upsertRows, {
+        onConflict: 'staff_id,year,week_number',
+      });
+
+      const { error: upsertError } = await fetchWithTimeout(upsertPromise, 8000);
+      if (upsertError) throw upsertError;
+
+      alert(`총 52주차 매출 데이터가 성공적으로 일괄 저장되었습니다!`);
+      fetchStaffData();
+    } catch (err: any) {
+      console.error('Save all revenues error:', err);
+      alert(`전체 매출 저장 실패: ${err.message}`);
+    } finally {
+      setRevenueSavingAll(false);
+    }
+  };
+
+  // ==========================================
+  // 📊 매출 집계 연산 (당월, 연간, 평균, 최고)
+  // ==========================================
+  const currentMonthNum = today.getMonth() + 1; // 현재 월 (1 ~ 12)
+
+  // 1. 당월(월간) 누적 매출
+  let monthlyAccumulatedRevenue = 0;
+  // 2. 연간 총 매출
+  let annualTotalRevenue = 0;
+  // 3. 최고 주간 매출
+  let maxWeeklyRevenue = 0;
+  // 4. 매출 입력 주차 개수
+  let enteredWeeksCount = 0;
+
+  for (let w = 1; w <= 52; w++) {
+    const val = parseInt(revenueInputs[w] || '0', 10) || 0;
+    const weekInfo = getWeekPeriodInfo(revenueYear, w);
+
+    annualTotalRevenue += val;
+
+    if (val > 0) {
+      enteredWeeksCount++;
+      if (val > maxWeeklyRevenue) {
+        maxWeeklyRevenue = val;
+      }
+    }
+
+    // 당월에 해당하는 주차 합산
+    if (weekInfo.startMonth === currentMonthNum || weekInfo.endMonth === currentMonthNum) {
+      monthlyAccumulatedRevenue += val;
+    }
+  }
+
+  const weeklyAverageRevenue = Math.round(annualTotalRevenue / 52);
+
   if (loading) {
     return (
       <div className="text-center py-12">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto mb-4"></div>
-        <p className="text-gray-500 text-sm">직원 상세 정보 및 달력 데이터를 불러오는 중입니다...</p>
+        <p className="text-gray-500 text-sm">직원 상세 정보 및 매출/달력 데이터를 불러오는 중입니다...</p>
       </div>
     );
   }
@@ -404,7 +614,7 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
   const selectedDateSchedules = staffSchedules.filter((s) => s.schedule_date === modalDateStr);
 
   return (
-    <div className="space-y-6 max-w-7xl mx-auto">
+    <div className="space-y-6 max-w-7xl mx-auto pb-12">
       {/* 상단 헤더 영역 */}
       <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center border-b pb-4 gap-4">
         <div>
@@ -412,7 +622,7 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
             &larr; 직원 목록으로
           </Link>
           <div className="flex items-center space-x-3">
-            <h1 className="text-2xl font-extrabold text-blue-600">{staff.name} 프로필 & 일정 달력</h1>
+            <h1 className="text-2xl font-extrabold text-blue-600">{staff.name} 직원 상세 관리</h1>
             <span className="text-xs bg-red-100 text-red-800 font-bold px-2.5 py-1 rounded-full">
               총 {staffSchedules.length}건 배정 완료
             </span>
@@ -429,275 +639,512 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
         </div>
       </div>
 
-      <form onSubmit={handleUpdate} className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* ========================================================= */}
-        {/* [좌측 2단 영역 (lg:col-span-2)]: 시각적 달력 & 6개월 장기 일정 */}
-        {/* ========================================================= */}
-        <div className="lg:col-span-2 space-y-6">
-          {/* 1. 시각적 달력 (Interactive Calendar Grid - 색상 음영 구분 적용) */}
-          <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
-            <div className="flex flex-col sm:flex-row justify-between items-center border-b pb-4 mb-4 gap-3">
-              <div>
-                <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
-                  <span>📅</span> 근무 배정 및 일정 달력
-                </h2>
-                <div className="flex items-center space-x-3 mt-1 text-xs">
-                  <span className="inline-flex items-center gap-1 font-semibold text-red-700">
-                    <span className="w-3 h-3 bg-red-100 border border-red-300 rounded"></span>
-                    일이 있는 일정 (빨간색 음영)
-                  </span>
-                  <span className="inline-flex items-center gap-1 font-semibold text-blue-700">
-                    <span className="w-3 h-3 bg-blue-50 border border-blue-200 rounded"></span>
-                    일이 없는 일정 (파란색 음영)
-                  </span>
-                </div>
-              </div>
+      {/* ========================================================= */}
+      {/* 📌 메인 탭 네비게이션 ([프로필 & 일정 달력] vs [매출 관리 (52주 정산)]) */}
+      {/* ========================================================= */}
+      <div className="flex border-b border-gray-200 bg-white rounded-t-xl p-1.5 gap-2 shadow-xs">
+        <button
+          type="button"
+          onClick={() => setActiveTab('profile')}
+          className={`flex-1 py-3 px-4 rounded-lg font-bold text-sm transition-all flex items-center justify-center gap-2 cursor-pointer ${
+            activeTab === 'profile'
+              ? 'bg-blue-600 text-white shadow-md'
+              : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+          }`}
+        >
+          <span>👤</span> 프로필 & 일정 달력
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('revenue')}
+          className={`flex-1 py-3 px-4 rounded-lg font-bold text-sm transition-all flex items-center justify-center gap-2 cursor-pointer ${
+            activeTab === 'revenue'
+              ? 'bg-blue-600 text-white shadow-md'
+              : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+          }`}
+        >
+          <span>💰</span> 매출 관리 (52주 정산)
+          {annualTotalRevenue > 0 && (
+            <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
+              activeTab === 'revenue' ? 'bg-white text-blue-800' : 'bg-blue-100 text-blue-800'
+            }`}>
+              {annualTotalRevenue.toLocaleString()}원
+            </span>
+          )}
+        </button>
+      </div>
 
-              {/* 월 조작 버튼 */}
-              <div className="flex items-center space-x-2 bg-gray-50 p-1 rounded-lg border border-gray-200">
-                <button
-                  type="button"
-                  onClick={handlePrevMonth}
-                  className="px-2.5 py-1 text-xs font-bold text-gray-700 hover:bg-white rounded cursor-pointer transition-colors"
-                >
-                  &larr; 이전 달
-                </button>
-                <span className="text-xs font-extrabold text-blue-700 px-2">
-                  {viewYear}년 {viewMonth + 1}월
-                </span>
-                <button
-                  type="button"
-                  onClick={handleTodayMonth}
-                  className="px-2 py-1 text-[11px] font-semibold text-blue-600 bg-blue-50 hover:bg-blue-100 rounded cursor-pointer"
-                >
-                  오늘
-                </button>
-                <button
-                  type="button"
-                  onClick={handleNextMonth}
-                  className="px-2.5 py-1 text-xs font-bold text-gray-700 hover:bg-white rounded cursor-pointer transition-colors"
-                >
-                  다음 달 &rarr;
-                </button>
-              </div>
-            </div>
-
-            <p className="text-xs text-gray-500 mb-3">
-              💡 **날짜 칸을 클릭**하면 팝업에서 마트를 선택하고 일하는 기간을 설정해 일정을 등록할 수 있습니다.
-            </p>
-
-            {/* 달력 그리드 테이블 */}
-            <div className="overflow-x-auto">
-              <div className="min-w-[600px]">
-                {/* 요일 헤더 */}
-                <div className="grid grid-cols-7 gap-1 text-center font-bold text-xs text-gray-600 bg-gray-50 p-2 rounded-t-lg border border-gray-200">
-                  <span className="text-red-500">일</span>
-                  <span>월</span>
-                  <span>화</span>
-                  <span>수</span>
-                  <span>목</span>
-                  <span>금</span>
-                  <span className="text-blue-600">토</span>
-                </div>
-
-                {/* 날짜 셀 그리드 (일이 있는 날: 빨간 음영 / 일이 없는 날: 파란 음영) */}
-                <div className="grid grid-cols-7 gap-1 border-x border-b border-gray-200 p-1 bg-gray-100/50 rounded-b-lg">
-                  {calendarDays.map((dayNum, idx) => {
-                    if (dayNum === null) {
-                      return <div key={`empty-${idx}`} className="h-24 bg-gray-50/50 rounded border border-transparent"></div>;
-                    }
-
-                    const dateStr = `${viewYear}-${String(viewMonth + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
-                    const daySchedules = staffSchedules.filter((s) => s.schedule_date === dateStr);
-                    const hasWork = daySchedules.length > 0;
-                    const isToday = dateStr === `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-                    const dayOfWeekIdx = idx % 7;
-                    const isSun = dayOfWeekIdx === 0;
-                    const isSat = dayOfWeekIdx === 6;
-
-                    return (
-                      <div
-                        key={dateStr}
-                        onClick={() => handleDayCellClick(dateStr)}
-                        className={`h-24 p-1.5 rounded border flex flex-col justify-between transition-all select-none cursor-pointer ${
-                          hasWork
-                            ? 'bg-red-50/80 border-2 border-red-300 hover:bg-red-100/90 shadow-2xs'
-                            : 'bg-blue-50/40 border border-blue-100 hover:bg-blue-100/50'
-                        } ${isToday ? 'ring-2 ring-blue-500 ring-offset-1 font-extrabold' : ''}`}
-                        title="클릭하여 마트 일정 배정 및 기간 설정"
-                      >
-                        <div className="flex justify-between items-center">
-                          <span
-                            className={`text-xs font-bold ${
-                              isToday
-                                ? 'bg-blue-600 text-white rounded-full w-5 h-5 flex items-center justify-center'
-                                : hasWork
-                                ? 'text-red-700 font-extrabold'
-                                : isSun
-                                ? 'text-red-500'
-                                : isSat
-                                ? 'text-blue-600'
-                                : 'text-gray-700'
-                            }`}
-                          >
-                            {dayNum}
-                          </span>
-                          {hasWork ? (
-                            <span className="text-[9px] bg-red-600 text-white font-bold px-1.5 py-0.5 rounded-full shadow-2xs">
-                              근무 {daySchedules.length}건
-                            </span>
-                          ) : (
-                            <span className="text-[8px] text-blue-400 opacity-60">
-                              +등록
-                            </span>
-                          )}
-                        </div>
-
-                        {/* 배정된 마트 스케줄 뱃지 (빨간색 강조) */}
-                        <div className="space-y-1 overflow-y-auto max-h-16 my-0.5">
-                          {daySchedules.map((sch) => (
-                            <div
-                              key={sch.id}
-                              className="text-[9px] bg-white border border-red-200 text-red-950 rounded p-1 font-bold leading-tight shadow-2xs truncate"
-                              title={`${sch.market_name} (${sch.business_type})`}
-                            >
-                              🏪 {sch.market_name}
-                              <div className="text-[8px] text-red-700 font-normal">{sch.business_type}</div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-
-            {/* 현재 월 장기 계획 요약 알림 */}
-            {getPlanForMonth(currentViewMonthStr) && (
-              <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-900 flex items-start gap-2">
-                <span className="text-base">💡</span>
+      {/* ========================================================= */}
+      {/* TAB 1: 프로필 & 일정 달력 뷰 */}
+      {/* ========================================================= */}
+      {activeTab === 'profile' && (
+        <form onSubmit={handleUpdate} className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-in fade-in duration-200">
+          {/* [좌측 2단 영역 (lg:col-span-2)]: 시각적 달력 & 6개월 장기 일정 */}
+          <div className="lg:col-span-2 space-y-6">
+            {/* 1. 시각적 달력 */}
+            <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
+              <div className="flex flex-col sm:flex-row justify-between items-center border-b pb-4 mb-4 gap-3">
                 <div>
-                  <span className="font-bold">{currentViewMonthStr}월 장기 일정 메모: </span>
-                  <span>{getPlanForMonth(currentViewMonthStr)}</span>
+                  <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                    <span>📅</span> 근무 배정 및 일정 달력
+                  </h2>
+                  <div className="flex items-center space-x-3 mt-1 text-xs">
+                    <span className="inline-flex items-center gap-1 font-semibold text-red-700">
+                      <span className="w-3 h-3 bg-red-100 border border-red-300 rounded"></span>
+                      일이 있는 일정 (빨간색 음영)
+                    </span>
+                    <span className="inline-flex items-center gap-1 font-semibold text-blue-700">
+                      <span className="w-3 h-3 bg-blue-50 border border-blue-200 rounded"></span>
+                      일이 없는 일정 (파란색 음영)
+                    </span>
+                  </div>
+                </div>
+
+                {/* 월 조작 버튼 */}
+                <div className="flex items-center space-x-2 bg-gray-50 p-1 rounded-lg border border-gray-200">
+                  <button
+                    type="button"
+                    onClick={handlePrevMonth}
+                    className="px-2.5 py-1 text-xs font-bold text-gray-700 hover:bg-white rounded cursor-pointer transition-colors"
+                  >
+                    &larr; 이전 달
+                  </button>
+                  <span className="text-xs font-extrabold text-blue-700 px-2">
+                    {viewYear}년 {viewMonth + 1}월
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleTodayMonth}
+                    className="px-2 py-1 text-[11px] font-semibold text-blue-600 bg-blue-50 hover:bg-blue-100 rounded cursor-pointer"
+                  >
+                    오늘
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleNextMonth}
+                    className="px-2.5 py-1 text-xs font-bold text-gray-700 hover:bg-white rounded cursor-pointer transition-colors"
+                  >
+                    다음 달 &rarr;
+                  </button>
                 </div>
               </div>
-            )}
+
+              <p className="text-xs text-gray-500 mb-3">
+                💡 **날짜 칸을 클릭**하면 팝업에서 마트를 선택하고 일하는 기간을 설정해 일정을 등록할 수 있습니다.
+              </p>
+
+              {/* 달력 그리드 테이블 */}
+              <div className="overflow-x-auto">
+                <div className="min-w-[600px]">
+                  <div className="grid grid-cols-7 gap-1 text-center font-bold text-xs text-gray-600 bg-gray-50 p-2 rounded-t-lg border border-gray-200">
+                    <span className="text-red-500">일</span>
+                    <span>월</span>
+                    <span>화</span>
+                    <span>수</span>
+                    <span>목</span>
+                    <span>금</span>
+                    <span className="text-blue-600">토</span>
+                  </div>
+
+                  <div className="grid grid-cols-7 gap-1 border-x border-b border-gray-200 p-1 bg-gray-100/50 rounded-b-lg">
+                    {calendarDays.map((dayNum, idx) => {
+                      if (dayNum === null) {
+                        return <div key={`empty-${idx}`} className="h-24 bg-gray-50/50 rounded border border-transparent"></div>;
+                      }
+
+                      const dateStr = `${viewYear}-${String(viewMonth + 1).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
+                      const daySchedules = staffSchedules.filter((s) => s.schedule_date === dateStr);
+                      const hasWork = daySchedules.length > 0;
+                      const isToday = dateStr === `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+                      const dayOfWeekIdx = idx % 7;
+                      const isSun = dayOfWeekIdx === 0;
+                      const isSat = dayOfWeekIdx === 6;
+
+                      return (
+                        <div
+                          key={dateStr}
+                          onClick={() => handleDayCellClick(dateStr)}
+                          className={`h-24 p-1.5 rounded border flex flex-col justify-between transition-all select-none cursor-pointer ${
+                            hasWork
+                              ? 'bg-red-50/80 border-2 border-red-300 hover:bg-red-100/90 shadow-2xs'
+                              : 'bg-blue-50/40 border border-blue-100 hover:bg-blue-100/50'
+                          } ${isToday ? 'ring-2 ring-blue-500 ring-offset-1 font-extrabold' : ''}`}
+                          title="클릭하여 마트 일정 배정 및 기간 설정"
+                        >
+                          <div className="flex justify-between items-center">
+                            <span
+                              className={`text-xs font-bold ${
+                                isToday
+                                  ? 'bg-blue-600 text-white rounded-full w-5 h-5 flex items-center justify-center'
+                                  : hasWork
+                                  ? 'text-red-700 font-extrabold'
+                                  : isSun
+                                  ? 'text-red-500'
+                                  : isSat
+                                  ? 'text-blue-600'
+                                  : 'text-gray-700'
+                              }`}
+                            >
+                              {dayNum}
+                            </span>
+                            {hasWork ? (
+                              <span className="text-[9px] bg-red-600 text-white font-bold px-1.5 py-0.5 rounded-full shadow-2xs">
+                                근무 {daySchedules.length}건
+                              </span>
+                            ) : (
+                              <span className="text-[8px] text-blue-400 opacity-60">
+                                +등록
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="space-y-1 overflow-y-auto max-h-16 my-0.5">
+                            {daySchedules.map((sch) => (
+                              <div
+                                key={sch.id}
+                                className="text-[9px] bg-white border border-red-200 text-red-950 rounded p-1 font-bold leading-tight shadow-2xs truncate"
+                                title={`${sch.market_name} (${sch.business_type})`}
+                              >
+                                🏪 {sch.market_name}
+                                <div className="text-[8px] text-red-700 font-normal">{sch.business_type}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              {getPlanForMonth(currentViewMonthStr) && (
+                <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-900 flex items-start gap-2">
+                  <span className="text-base">💡</span>
+                  <div>
+                    <span className="font-bold">{currentViewMonthStr}월 장기 일정 메모: </span>
+                    <span>{getPlanForMonth(currentViewMonthStr)}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* 2. 향후 6개월 장기 일정 계획 통합 폼 */}
+            <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm space-y-4">
+              <div className="border-b pb-3">
+                <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                  <span>📝</span> 향후 6개월 장기 일정 및 근무 희망계획
+                </h2>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  직원의 장기 근무 가능 지역, 희망 휴무일 또는 특이 스케줄을 월별로 입력해 관리합니다.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {targetMonths.map((monthStr) => (
+                  <div key={monthStr} className="p-3 bg-gray-50 border border-gray-200 rounded-lg space-y-1.5">
+                    <div className="flex justify-between items-center">
+                      <label className="text-xs font-extrabold text-blue-700">{monthStr} 월간 계획</label>
+                      <span className="text-[10px] text-gray-400">
+                        {monthStr === currentViewMonthStr ? '● 현재 조회 중' : ''}
+                      </span>
+                    </div>
+                    <input
+                      type="text"
+                      value={getPlanForMonth(monthStr)}
+                      onChange={(e) => handlePlanChange(monthStr, e.target.value)}
+                      placeholder="예: 서울 서초 선호, 셋째주 주말 휴무 희망 등"
+                      className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
 
-          {/* 2. 향후 6개월 장기 일정 계획 통합 폼 */}
-          <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm space-y-4">
-            <div className="border-b pb-3">
-              <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
-                <span>📝</span> 향후 6개월 장기 일정 및 근무 희망계획
+          {/* [우측 1단 영역 (lg:col-span-1)]: 직원 프로필 기본 정보 편집 */}
+          <div className="space-y-6">
+            <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm space-y-5">
+              <h2 className="text-lg font-bold text-gray-900 border-b pb-3 flex items-center gap-2">
+                <span>👤</span> 직원 프로필 기본 정보
               </h2>
-              <p className="text-xs text-gray-500 mt-0.5">
-                직원의 장기 근무 가능 지역, 희망 휴무일 또는 특이 스케줄을 월별로 입력해 관리합니다.
+
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">성명</label>
+                <input
+                  type="text"
+                  required
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">연락처</label>
+                <input
+                  type="text"
+                  required
+                  value={contact}
+                  onChange={(e) => setContact(e.target.value)}
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-2">활동 증빙 영상 첨부</label>
+                {videoUrl ? (
+                  <div className="mb-3 space-y-1">
+                    <p className="text-[11px] font-semibold text-blue-700">현재 등록된 동영상:</p>
+                    <video src={videoUrl} controls className="w-full max-h-48 rounded-lg border bg-black object-cover" />
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-gray-400 mb-2">등록된 동영상이 없습니다.</p>
+                )}
+                <MediaUpload
+                  onUploadComplete={(url) => setVideoUrl(url)}
+                  accept="video/*"
+                  maxDurationSeconds={12}
+                  theme="blue"
+                  label="새 활동 동영상 업로드 (최대 10초)"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">
+                  관리자 특이사항 메모 <span className="text-red-500 font-normal">(비공개)</span>
+                </label>
+                <textarea
+                  value={adminNotes}
+                  onChange={(e) => setAdminNotes(e.target.value)}
+                  placeholder="예: 시간 약속 철저함, 숙련자, 특정 마트 선호 등 관리자 전용 메모"
+                  rows={4}
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+
+              <div className="pt-2">
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm rounded-md shadow-sm disabled:opacity-50 transition-colors cursor-pointer"
+                >
+                  {saving ? '프로필 저장 중...' : '프로필 & 일정 저장'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </form>
+      )}
+
+      {/* ========================================================= */}
+      {/* TAB 2: 매출 관리 (52주 정산) 뷰 */}
+      {/* ========================================================= */}
+      {activeTab === 'revenue' && (
+        <div className="space-y-6 animate-in fade-in duration-200">
+          {/* 상단 정산 요약 집계 카드 (Summary) */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* 1. 당월 누적 매출 */}
+            <div className="bg-gradient-to-br from-blue-600 to-blue-700 text-white p-5 rounded-xl shadow-sm space-y-1">
+              <div className="flex justify-between items-center text-blue-100 text-xs font-bold">
+                <span>💳 {currentMonthNum}월(당월) 누적 매출</span>
+                <span className="bg-white/20 px-2 py-0.5 rounded text-[10px]">월간 집계</span>
+              </div>
+              <div className="text-2xl font-black pt-1">
+                {monthlyAccumulatedRevenue.toLocaleString()}<span className="text-base font-normal ml-1">원</span>
+              </div>
+              <p className="text-[11px] text-blue-200 pt-0.5">
+                현재 월에 해당하는 주차들의 실적 합계
               </p>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {targetMonths.map((monthStr) => (
-                <div key={monthStr} className="p-3 bg-gray-50 border border-gray-200 rounded-lg space-y-1.5">
-                  <div className="flex justify-between items-center">
-                    <label className="text-xs font-extrabold text-blue-700">{monthStr} 월간 계획</label>
-                    <span className="text-[10px] text-gray-400">
-                      {monthStr === currentViewMonthStr ? '● 현재 조회 중' : ''}
-                    </span>
-                  </div>
-                  <input
-                    type="text"
-                    value={getPlanForMonth(monthStr)}
-                    onChange={(e) => handlePlanChange(monthStr, e.target.value)}
-                    placeholder="예: 서울 서초 선호, 셋째주 주말 휴무 희망 등"
-                    className="w-full border border-gray-300 rounded-md px-3 py-1.5 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  />
-                </div>
-              ))}
+            {/* 2. 연간 총 매출 */}
+            <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm space-y-1">
+              <div className="flex justify-between items-center text-gray-500 text-xs font-bold">
+                <span>🏆 {revenueYear}년 총 누적 매출</span>
+                <span className="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded text-[10px]">52주 총합</span>
+              </div>
+              <div className="text-2xl font-extrabold text-gray-900 pt-1">
+                {annualTotalRevenue.toLocaleString()}<span className="text-base font-normal ml-1">원</span>
+              </div>
+              <p className="text-[11px] text-gray-400 pt-0.5">
+                선택한 연도 전체 주차의 매출 총계
+              </p>
+            </div>
+
+            {/* 3. 주간 평균 매출 */}
+            <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm space-y-1">
+              <div className="flex justify-between items-center text-gray-500 text-xs font-bold">
+                <span>📊 주간 평균 매출</span>
+                <span className="bg-purple-100 text-purple-800 px-2 py-0.5 rounded text-[10px]">평균값</span>
+              </div>
+              <div className="text-2xl font-extrabold text-purple-900 pt-1">
+                {weeklyAverageRevenue.toLocaleString()}<span className="text-base font-normal ml-1">원/주</span>
+              </div>
+              <p className="text-[11px] text-gray-400 pt-0.5">
+                52주 기준 1주일당 평균 발생 매출
+              </p>
+            </div>
+
+            {/* 4. 최고 주간 매출 */}
+            <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm space-y-1">
+              <div className="flex justify-between items-center text-gray-500 text-xs font-bold">
+                <span>🚩 최고 주간 매출</span>
+                <span className="bg-amber-100 text-amber-800 px-2 py-0.5 rounded text-[10px]">최고실적</span>
+              </div>
+              <div className="text-2xl font-extrabold text-amber-600 pt-1">
+                {maxWeeklyRevenue.toLocaleString()}<span className="text-base font-normal ml-1">원</span>
+              </div>
+              <p className="text-[11px] text-gray-400 pt-0.5">
+                입력된 주차 중 단일 주차 최대 실적
+              </p>
             </div>
           </div>
-        </div>
 
-        {/* ========================================================= */}
-        {/* [우측 1단 영역 (lg:col-span-1)]: 직원 프로필 기본 정보 편집 */}
-        {/* ========================================================= */}
-        <div className="space-y-6">
-          <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm space-y-5">
-            <h2 className="text-lg font-bold text-gray-900 border-b pb-3 flex items-center gap-2">
-              <span>👤</span> 직원 프로필 기본 정보
-            </h2>
-
-            {/* 이름 */}
-            <div>
-              <label className="block text-xs font-bold text-gray-700 mb-1">성명</label>
-              <input
-                type="text"
-                required
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
-              />
-            </div>
-
-            {/* 연락처 */}
-            <div>
-              <label className="block text-xs font-bold text-gray-700 mb-1">연락처</label>
-              <input
-                type="text"
-                required
-                value={contact}
-                onChange={(e) => setContact(e.target.value)}
-                className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
-              />
-            </div>
-
-            {/* 활동 증빙 영상 */}
-            <div>
-              <label className="block text-xs font-bold text-gray-700 mb-2">활동 증빙 영상 첨부</label>
-              {videoUrl ? (
-                <div className="mb-3 space-y-1">
-                  <p className="text-[11px] font-semibold text-blue-700">현재 등록된 동영상:</p>
-                  <video src={videoUrl} controls className="w-full max-h-48 rounded-lg border bg-black object-cover" />
-                </div>
-              ) : (
-                <p className="text-[11px] text-gray-400 mb-2">등록된 동영상이 없습니다.</p>
-              )}
-              <MediaUpload
-                onUploadComplete={(url) => setVideoUrl(url)}
-                accept="video/*"
-                maxDurationSeconds={12}
-                theme="blue"
-                label="새 활동 동영상 업로드 (최대 10초)"
-              />
-            </div>
-
-            {/* 관리자 특이사항 (비공개) */}
-            <div>
-              <label className="block text-xs font-bold text-gray-700 mb-1">
-                관리자 특이사항 메모 <span className="text-red-500 font-normal">(비공개)</span>
-              </label>
-              <textarea
-                value={adminNotes}
-                onChange={(e) => setAdminNotes(e.target.value)}
-                placeholder="예: 시간 약속 철저함, 숙련자, 특정 마트 선호 등 관리자 전용 메모"
-                rows={4}
-                className="w-full border border-gray-300 rounded-md px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-              />
-            </div>
-
-            {/* 변경 사항 저장 버튼 */}
-            <div className="pt-2">
-              <button
-                type="submit"
-                disabled={saving}
-                className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm rounded-md shadow-sm disabled:opacity-50 transition-colors cursor-pointer"
+          {/* 52주 정산 컨트롤 바 (연도 선택 & 전체 저장) */}
+          <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm flex flex-col sm:flex-row justify-between items-center gap-4">
+            <div className="flex items-center space-x-3">
+              <label className="text-sm font-bold text-gray-700">정산 연도 선택:</label>
+              <select
+                value={revenueYear}
+                onChange={(e) => setRevenueYear(Number(e.target.value))}
+                className="border border-gray-300 rounded-md px-3 py-1.5 text-sm font-bold text-blue-700 bg-gray-50 focus:ring-1 focus:ring-blue-500"
               >
-                {saving ? '프로필 저장 중...' : '프로필 & 일정 저장'}
-              </button>
+                <option value={2025}>2025년 (52주 정산)</option>
+                <option value={2026}>2026년 (52주 정산)</option>
+                <option value={2027}>2027년 (52주 정산)</option>
+                <option value={2028}>2028년 (52주 정산)</option>
+              </select>
+              <span className="text-xs text-gray-500 hidden md:inline">
+                * 주차별 매출을 입력하고 [저장] 버튼을 누르면 DB에 즉시 정산 기록됩니다.
+              </span>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleSaveAllRevenues}
+              disabled={revenueSavingAll}
+              className="w-full sm:w-auto px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-md shadow-sm cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5 transition-colors"
+            >
+              {revenueSavingAll ? '전체 저장 중...' : '💾 52주 매출 전체 일괄 저장'}
+            </button>
+          </div>
+
+          {/* 52주 정산 데이터 테이블 (Table View) */}
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+            <div className="p-4 border-b bg-gray-50 flex justify-between items-center">
+              <h2 className="text-base font-bold text-gray-900 flex items-center gap-2">
+                <span>📋</span> [{staff.name}] {revenueYear}년 52주 주간 매출 입력 및 정산표
+              </h2>
+              <span className="text-xs text-gray-500">
+                입력된 주차: <strong className="text-blue-600">{enteredWeeksCount}</strong> / 52 주차
+              </span>
+            </div>
+
+            <div className="overflow-x-auto max-h-[700px]">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-gray-100 border-b text-gray-700 font-extrabold sticky top-0 z-10">
+                  <tr>
+                    <th className="py-3 px-4 w-24">주차</th>
+                    <th className="py-3 px-4 w-36">기간</th>
+                    <th className="py-3 px-4">담당 마트 (자동 매칭)</th>
+                    <th className="py-3 px-4 w-48">매출 입력 금액 (원)</th>
+                    <th className="py-3 px-4 w-24 text-center">저장</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-200">
+                  {Array.from({ length: 52 }, (_, i) => i + 1).map((weekNum) => {
+                    const weekInfo = getWeekPeriodInfo(revenueYear, weekNum);
+                    
+                    // 해당 주차 범위에 배정된 마트 찾기
+                    const matchedSchedules = staffSchedules.filter(
+                      (s) => s.schedule_date >= weekInfo.startStr && s.schedule_date <= weekInfo.endStr
+                    );
+
+                    // unique 마트명 추출
+                    const matchedMarketNames = Array.from(
+                      new Set(matchedSchedules.map((s) => `${s.market_name} (${s.business_type})`))
+                    );
+
+                    const inputValue = revenueInputs[weekNum] || '';
+                    const isSavingThisWeek = revenueSavingWeek === weekNum;
+                    const isCurrentMonthWeek = weekInfo.startMonth === currentMonthNum || weekInfo.endMonth === currentMonthNum;
+
+                    return (
+                      <tr
+                        key={weekNum}
+                        className={`hover:bg-blue-50/50 transition-colors ${
+                          isCurrentMonthWeek ? 'bg-blue-50/20' : ''
+                        }`}
+                      >
+                        {/* 주차 */}
+                        <td className="py-2.5 px-4 font-bold text-gray-900">
+                          <span className="inline-flex items-center gap-1.5">
+                            {weekNum}주차
+                            {isCurrentMonthWeek && (
+                              <span className="w-2 h-2 rounded-full bg-blue-500" title="당월 주차"></span>
+                            )}
+                          </span>
+                        </td>
+
+                        {/* 기간 */}
+                        <td className="py-2.5 px-4 font-mono text-gray-600">
+                          {weekInfo.periodText}
+                        </td>
+
+                        {/* 담당 마트 */}
+                        <td className="py-2.5 px-4">
+                          {matchedMarketNames.length > 0 ? (
+                            <div className="flex flex-wrap gap-1">
+                              {matchedMarketNames.map((name, idx) => (
+                                <span
+                                  key={idx}
+                                  className="bg-red-50 text-red-800 border border-red-200 px-2 py-0.5 rounded text-[10px] font-bold"
+                                >
+                                  🏪 {name}
+                                </span>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-gray-400 text-[11px] font-normal">- 미배정 -</span>
+                          )}
+                        </td>
+
+                        {/* 매출 입력 칸 */}
+                        <td className="py-2.5 px-4">
+                          <div className="relative max-w-xs">
+                            <input
+                              type="text"
+                              value={inputValue ? Number(inputValue).toLocaleString() : ''}
+                              onChange={(e) => handleRevenueInputChange(weekNum, e.target.value)}
+                              placeholder="0"
+                              className="w-full border border-gray-300 rounded-md pl-3 pr-8 py-1.5 text-xs font-bold text-right text-gray-900 focus:ring-1 focus:ring-blue-500 focus:outline-none bg-white"
+                            />
+                            <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 text-[11px] pointer-events-none">
+                              원
+                            </span>
+                          </div>
+                        </td>
+
+                        {/* 저장 버튼 */}
+                        <td className="py-2.5 px-4 text-center">
+                          <button
+                            type="button"
+                            onClick={() => handleSaveWeekRevenue(weekNum)}
+                            disabled={isSavingThisWeek}
+                            className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white font-bold text-[11px] rounded shadow-2xs disabled:opacity-50 cursor-pointer transition-colors"
+                          >
+                            {isSavingThisWeek ? '저장...' : '저장'}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           </div>
         </div>
-      </form>
+      )}
 
       {/* ========================================================= */}
       {/* 📅 마트 일정 배정 및 일하는 기간 설정 모달 팝업 */}
@@ -782,7 +1229,6 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
                 </select>
               </div>
 
-              {/* 일하는 기간 설정 (Start ~ End) */}
               <div className="grid grid-cols-2 gap-3 pt-1">
                 <div>
                   <label className="block text-xs font-bold text-gray-700 mb-1">
