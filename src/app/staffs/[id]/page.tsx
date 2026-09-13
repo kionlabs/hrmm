@@ -756,9 +756,9 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
       {/* TAB 1: 프로필 & 일정 달력 뷰 */}
       {/* ========================================================= */}
       {activeTab === 'profile' && (
-        <form onSubmit={handleUpdate} className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-in fade-in duration-200">
-          {/* [좌측 2단 영역 (lg:col-span-2)]: 시각적 달력 & 6개월 장기 일정 */}
-          <div className="lg:col-span-2 space-y-6">
+        <form onSubmit={handleUpdate} className="grid grid-cols-1 md:grid-cols-3 gap-6 animate-in fade-in duration-200">
+          {/* [좌측 2단 영역 (md:col-span-2)]: 시각적 달력 & 6개월 장기 일정 */}
+          <div className="md:col-span-2 space-y-6">
             {/* 1. 시각적 달력 */}
             <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
               <div className="flex flex-col sm:flex-row justify-between items-center border-b pb-4 mb-4 gap-3">
@@ -943,8 +943,8 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
             </div>
           </div>
 
-          {/* [우측 1단 영역 (lg:col-span-1)]: 직원 프로필 기본 정보 편집 */}
-          <div className="space-y-6">
+          {/* [우측 1단 영역 (md:col-span-1)]: 직원 프로필 기본 정보 편집 */}
+          <div className="md:col-span-1 space-y-6">
             <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm space-y-5">
               <h2 className="text-lg font-bold text-gray-900 border-b pb-3 flex items-center gap-2">
                 <span>👤</span> 직원 프로필 기본 정보
@@ -1060,7 +1060,7 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
           )}
 
           {/* 상단 정산 요약 집계 카드 (Summary - 5개 카드 구성) */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-3">
             {/* 1. 당월 누적 매출 */}
             <div className="bg-gradient-to-br from-blue-600 to-blue-700 text-white p-5 rounded-xl shadow-sm space-y-1">
               <div className="flex justify-between items-center text-blue-100 text-xs font-bold">
