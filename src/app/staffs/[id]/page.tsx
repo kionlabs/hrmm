@@ -85,6 +85,23 @@ const getWeekPeriodInfo = (year: number, weekNum: number) => {
   };
 };
 
+const REVENUE_SQL_SCRIPT = `CREATE TABLE IF NOT EXISTS hrmm.revenues (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    staff_id UUID NOT NULL REFERENCES hrmm.staffs(id) ON DELETE CASCADE,
+    market_id UUID REFERENCES hrmm.markets(id) ON DELETE SET NULL,
+    year INTEGER NOT NULL,
+    week_number INTEGER NOT NULL CHECK (week_number BETWEEN 1 AND 53),
+    period_text TEXT,
+    revenue_amount INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    CONSTRAINT unique_staff_year_week UNIQUE (staff_id, year, week_number)
+);
+
+ALTER TABLE hrmm.revenues ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow public read access to revenues" ON hrmm.revenues FOR SELECT USING (true);
+CREATE POLICY "Allow public write access to revenues" ON hrmm.revenues FOR ALL USING (true);`;
+
 export default function StaffDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const resolvedParams = use(params);
   const id = resolvedParams.id;
@@ -132,6 +149,7 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
   const [revenueInputs, setRevenueInputs] = useState<Record<number, string>>({});
   const [revenueSavingWeek, setRevenueSavingWeek] = useState<number | null>(null);
   const [revenueSavingAll, setRevenueSavingAll] = useState<boolean>(false);
+  const [showDbMissingNotice, setShowDbMissingNotice] = useState<boolean>(false);
 
   // 날짜 포맷 (YYYY-MM-DD)
   const formatDate = (date: Date): string => {
@@ -227,7 +245,10 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
         setStaffSchedules(formatted);
       }
 
-      // 4. 52주 매출 데이터 조회 (실패 시 예외 처리)
+      // 4. 52주 매출 데이터 조회 (Supabase 우선, 실패 시 localStorage 폴백)
+      let fetchedRevenues: StaffRevenueItem[] = [];
+      let isDbError = false;
+
       try {
         const revenuesPromise = supabase
           .from('revenues')
@@ -235,18 +256,39 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
           .eq('staff_id', id)
           .eq('year', revenueYear);
 
-        const revRes = await fetchWithTimeout(revenuesPromise, 4000);
-        if (revRes.data) {
-          setRevenues(revRes.data);
-          const inputMap: Record<number, string> = {};
-          revRes.data.forEach((r: StaffRevenueItem) => {
-            inputMap[r.week_number] = String(r.revenue_amount || 0);
-          });
-          setRevenueInputs(inputMap);
+        const revRes = await fetchWithTimeout(revenuesPromise, 3000);
+        if (revRes.data && !revRes.error) {
+          fetchedRevenues = revRes.data;
+        } else if (revRes.error) {
+          isDbError = true;
         }
       } catch (revErr) {
         console.warn('Revenues table query skipped or table not created yet:', revErr);
+        isDbError = true;
       }
+
+      // DB 조회 실패 또는 미생성 시 localStroage에서 보완
+      if (isDbError) {
+        setShowDbMissingNotice(true);
+        const localDataStr = typeof window !== 'undefined' ? localStorage.getItem(`hrmm_revenues_${id}_${revenueYear}`) : null;
+        if (localDataStr) {
+          try {
+            fetchedRevenues = JSON.parse(localDataStr);
+          } catch (e) {
+            console.error('Failed to parse local revenue data:', e);
+          }
+        }
+      }
+
+      setRevenues(fetchedRevenues);
+      const inputMap: Record<number, string> = {};
+      fetchedRevenues.forEach((r: StaffRevenueItem) => {
+        if (r.week_number) {
+          inputMap[r.week_number] = String(r.revenue_amount || 0);
+        }
+      });
+      setRevenueInputs(inputMap);
+
     } catch (err: any) {
       console.error('Error fetching staff detail:', err);
       setError('직원 정보를 불러오는 중 오류가 발생했습니다.');
@@ -444,7 +486,7 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
   const currentViewMonthStr = `${viewYear}-${String(viewMonth + 1).padStart(2, '0')}`;
 
   // ==========================================
-  // 💰 매출 저장 & 집계 핸들러
+  // 💰 매출 저장 & 집계 핸들러 (localStorage + Supabase 하이브리드)
   // ==========================================
   const handleRevenueInputChange = (weekNum: number, value: string) => {
     const sanitized = value.replace(/[^0-9]/g, '');
@@ -459,13 +501,46 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
     const amount = parseInt(amountStr, 10) || 0;
     const weekInfo = getWeekPeriodInfo(revenueYear, weekNum);
 
-    // 해당 주차 범위 내 배정된 마트 확인
     const matchedSchedule = staffSchedules.find(
       (s) => s.schedule_date >= weekInfo.startStr && s.schedule_date <= weekInfo.endStr
     );
     const marketId = matchedSchedule ? matchedSchedule.market_id : null;
 
     setRevenueSavingWeek(weekNum);
+
+    const newItem: StaffRevenueItem = {
+      staff_id: id,
+      year: revenueYear,
+      week_number: weekNum,
+      period_text: weekInfo.periodText,
+      revenue_amount: amount,
+      market_id: marketId,
+    };
+
+    // 1. 로컬 상태 및 localStorage 즉시 반영 (실패 없는 UX 보장)
+    setRevenues((prev) => {
+      const idx = prev.findIndex((r) => r.year === revenueYear && r.week_number === weekNum);
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = newItem;
+        return next;
+      }
+      return [...prev, newItem];
+    });
+
+    try {
+      const localKey = `hrmm_revenues_${id}_${revenueYear}`;
+      const existingStr = localStorage.getItem(localKey);
+      let localArr: StaffRevenueItem[] = existingStr ? JSON.parse(existingStr) : [];
+      const idx = localArr.findIndex((r) => r.week_number === weekNum);
+      if (idx >= 0) localArr[idx] = newItem;
+      else localArr.push(newItem);
+      localStorage.setItem(localKey, JSON.stringify(localArr));
+    } catch (e) {
+      console.warn('LocalStorage save error:', e);
+    }
+
+    // 2. Supabase DB Upsert 시도
     try {
       const upsertPromise = supabase.from('revenues').upsert(
         {
@@ -480,34 +555,17 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
         { onConflict: 'staff_id,year,week_number' }
       );
 
-      const { error: upsertError } = await fetchWithTimeout(upsertPromise, 5000);
-      if (upsertError) throw upsertError;
+      const { error: upsertError } = await fetchWithTimeout(upsertPromise, 4000);
 
-      // 로컬 state 동기화
-      setRevenues((prev) => {
-        const existingIdx = prev.findIndex(
-          (r) => r.year === revenueYear && r.week_number === weekNum
-        );
-        const newItem: StaffRevenueItem = {
-          staff_id: id,
-          year: revenueYear,
-          week_number: weekNum,
-          period_text: weekInfo.periodText,
-          revenue_amount: amount,
-          market_id: marketId,
-        };
-        if (existingIdx >= 0) {
-          const next = [...prev];
-          next[existingIdx] = newItem;
-          return next;
-        }
-        return [...prev, newItem];
-      });
-
-      alert(`${weekNum}주차 매출(${amount.toLocaleString()}원)이 저장되었습니다.`);
+      if (upsertError) {
+        setShowDbMissingNotice(true);
+        alert(`${weekNum}주차 매출(${amount.toLocaleString()}원)이 로컬에 저장되었습니다.\n(※ Supabase DB에 hrmm.revenues 테이블 생성이 필요합니다. 상단 SQL을 실행해 주세요.)`);
+      } else {
+        alert(`${weekNum}주차 매출(${amount.toLocaleString()}원)이 DB에 성공적으로 저장되었습니다.`);
+      }
     } catch (err: any) {
-      console.error('Save revenue error:', err);
-      alert(`매출 저장 실패: ${err.message}\n\n(※ Supabase에 hrmm.revenues 테이블이 생성되어 있는지 확인해주세요)`);
+      setShowDbMissingNotice(true);
+      alert(`${weekNum}주차 매출(${amount.toLocaleString()}원)이 로컬에 안전하게 저장되었습니다.\n(※ Supabase DB 생성을 위한 SQL 가이드가 상단에 표시됩니다.)`);
     } finally {
       setRevenueSavingWeek(null);
     }
@@ -516,40 +574,53 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
   // 52주 전체 일괄 저장
   const handleSaveAllRevenues = async () => {
     setRevenueSavingAll(true);
-    try {
-      const upsertRows = [];
-      for (let w = 1; w <= 52; w++) {
-        const valStr = revenueInputs[w] || '0';
-        const amount = parseInt(valStr, 10) || 0;
-        const weekInfo = getWeekPeriodInfo(revenueYear, w);
+    const upsertRows: StaffRevenueItem[] = [];
 
-        const matchedSchedule = staffSchedules.find(
-          (s) => s.schedule_date >= weekInfo.startStr && s.schedule_date <= weekInfo.endStr
-        );
+    for (let w = 1; w <= 52; w++) {
+      const valStr = revenueInputs[w] || '0';
+      const amount = parseInt(valStr, 10) || 0;
+      const weekInfo = getWeekPeriodInfo(revenueYear, w);
 
-        upsertRows.push({
-          staff_id: id,
-          year: revenueYear,
-          week_number: w,
-          period_text: weekInfo.periodText,
-          revenue_amount: amount,
-          market_id: matchedSchedule ? matchedSchedule.market_id : null,
-          updated_at: new Date().toISOString(),
-        });
-      }
+      const matchedSchedule = staffSchedules.find(
+        (s) => s.schedule_date >= weekInfo.startStr && s.schedule_date <= weekInfo.endStr
+      );
 
-      const upsertPromise = supabase.from('revenues').upsert(upsertRows, {
-        onConflict: 'staff_id,year,week_number',
+      upsertRows.push({
+        staff_id: id,
+        year: revenueYear,
+        week_number: w,
+        period_text: weekInfo.periodText,
+        revenue_amount: amount,
+        market_id: matchedSchedule ? matchedSchedule.market_id : null,
       });
+    }
 
-      const { error: upsertError } = await fetchWithTimeout(upsertPromise, 8000);
-      if (upsertError) throw upsertError;
+    // 로컬 상태 & localStorage 즉시 저장
+    setRevenues(upsertRows);
+    try {
+      localStorage.setItem(`hrmm_revenues_${id}_${revenueYear}`, JSON.stringify(upsertRows));
+    } catch (e) {
+      console.warn('LocalStorage bulk save error:', e);
+    }
 
-      alert(`총 52주차 매출 데이터가 성공적으로 일괄 저장되었습니다!`);
-      fetchStaffData();
+    // Supabase DB 저장 시도
+    try {
+      const upsertPromise = supabase.from('revenues').upsert(
+        upsertRows.map((r) => ({ ...r, updated_at: new Date().toISOString() })),
+        { onConflict: 'staff_id,year,week_number' }
+      );
+
+      const { error: upsertError } = await fetchWithTimeout(upsertPromise, 6000);
+
+      if (upsertError) {
+        setShowDbMissingNotice(true);
+        alert(`총 52주차 매출이 로컬 저장소에 일괄 저장되었습니다.\n(※ Supabase DB에 hrmm.revenues 테이블을 생성하시면 DB에 완벽히 동기화됩니다.)`);
+      } else {
+        alert(`총 52주차 매출 데이터가 Supabase DB에 완벽하게 일괄 저장되었습니다!`);
+      }
     } catch (err: any) {
-      console.error('Save all revenues error:', err);
-      alert(`전체 매출 저장 실패: ${err.message}`);
+      setShowDbMissingNotice(true);
+      alert(`총 52주차 매출이 로컬 저장소에 일괄 저장되었습니다.\n(※ Supabase 대시보드 SQL Editor에서 hrmm.revenues 테이블 생성을 진행해 주세요.)`);
     } finally {
       setRevenueSavingAll(false);
     }
@@ -560,13 +631,9 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
   // ==========================================
   const currentMonthNum = today.getMonth() + 1; // 현재 월 (1 ~ 12)
 
-  // 1. 당월(월간) 누적 매출
   let monthlyAccumulatedRevenue = 0;
-  // 2. 연간 총 매출
   let annualTotalRevenue = 0;
-  // 3. 최고 주간 매출
   let maxWeeklyRevenue = 0;
-  // 4. 매출 입력 주차 개수
   let enteredWeeksCount = 0;
 
   for (let w = 1; w <= 52; w++) {
@@ -582,7 +649,6 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
       }
     }
 
-    // 당월에 해당하는 주차 합산
     if (weekInfo.startMonth === currentMonthNum || weekInfo.endMonth === currentMonthNum) {
       monthlyAccumulatedRevenue += val;
     }
@@ -941,6 +1007,42 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
       {/* ========================================================= */}
       {activeTab === 'revenue' && (
         <div className="space-y-6 animate-in fade-in duration-200">
+          {/* Supabase DB 설치 안내 배너 (DB 미설치 시 자동 표시) */}
+          {showDbMissingNotice && (
+            <div className="bg-amber-50 border-l-4 border-amber-500 p-4 rounded-xl shadow-xs space-y-2.5">
+              <div className="flex justify-between items-start">
+                <div className="flex items-center gap-2 font-extrabold text-amber-900 text-sm">
+                  <span>⚠️</span>
+                  <span>Supabase 데이터베이스 (`hrmm.revenues`) 1초 설치 안내</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowDbMissingNotice(false)}
+                  className="text-amber-700 hover:text-amber-950 font-bold text-xs cursor-pointer"
+                >
+                  닫기 ✕
+                </button>
+              </div>
+              <p className="text-xs text-amber-800 leading-relaxed">
+                현재 Supabase DB에 <code className="bg-amber-100 px-1.5 py-0.5 rounded font-mono text-amber-900 font-bold">hrmm.revenues</code> 테이블이 아직 생성되지 않아 입력하신 매출이 <strong>브라우저 내(localStorage)에 안전하게 임시 저장</strong>되고 있습니다.
+                원격 데이터베이스로의 완전한 저장 및 동기화를 위해, 아래 버튼을 눌러 SQL을 복사한 후 <strong>Supabase 대시보드 &gt; SQL Editor</strong>에서 실행해 주세요.
+              </p>
+              <div className="bg-slate-900 text-slate-100 p-3 rounded-lg text-xs font-mono overflow-x-auto relative">
+                <pre className="text-[11px] leading-relaxed">{REVENUE_SQL_SCRIPT}</pre>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(REVENUE_SQL_SCRIPT);
+                    alert('Supabase DB 설치 SQL 구문이 클립보드에 복사되었습니다!\nSupabase SQL Editor에 붙여넣어 실행(Run)해 주세요.');
+                  }}
+                  className="absolute top-2 right-2 bg-amber-400 hover:bg-amber-500 text-slate-950 px-3 py-1 rounded-md font-extrabold text-[11px] cursor-pointer shadow-xs transition-colors"
+                >
+                  📋 SQL 1초 복사
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* 상단 정산 요약 집계 카드 (Summary) */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             {/* 1. 당월 누적 매출 */}
@@ -1015,7 +1117,7 @@ export default function StaffDetailPage({ params }: { params: Promise<{ id: stri
                 <option value={2028}>2028년 (52주 정산)</option>
               </select>
               <span className="text-xs text-gray-500 hidden md:inline">
-                * 주차별 매출을 입력하고 [저장] 버튼을 누르면 DB에 즉시 정산 기록됩니다.
+                * 주차별 매출을 입력하고 [저장] 버튼을 누르면 정산 기록됩니다.
               </span>
             </div>
 
