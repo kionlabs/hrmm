@@ -20,8 +20,12 @@ export default function Navbar() {
         <div className="flex justify-between h-16">
           <div className="flex">
             <div className="flex-shrink-0 flex items-center">
-              <Link href="/" className="text-xl font-bold text-blue-600">
-                HRMM 스케줄러
+              <Link href="/" className="flex items-center gap-2 group py-1">
+                <img
+                  src="/logo.png"
+                  alt="(주)대산 로고"
+                  className="h-8 sm:h-9 w-auto object-contain transition-transform group-hover:scale-105"
+                />
               </Link>
             </div>
             <div className="hidden sm:ml-6 sm:flex sm:space-x-8">
