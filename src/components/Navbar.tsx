@@ -17,14 +17,14 @@ export default function Navbar() {
   return (
     <nav className="bg-white border-b border-gray-200 shadow-sm">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex justify-between items-center h-24 sm:h-28 py-3">
+        <div className="flex justify-between items-center h-20 sm:h-24 py-2">
           <div className="flex items-center">
             <div className="flex-shrink-0 flex items-center">
               <Link href="/" className="flex items-center gap-2 group py-1">
                 <img
                   src="/logo.png"
                   alt="(주)대산 로고"
-                  className="h-16 sm:h-20 md:h-22 w-auto object-contain transition-transform group-hover:scale-105 drop-shadow-xs"
+                  className="h-14 sm:h-18 md:h-20 w-auto object-contain transition-transform group-hover:scale-105"
                 />
               </Link>
             </div>

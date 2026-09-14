@@ -161,16 +161,8 @@ export default function Home() {
   };
 
   return (
-    <div className="space-y-8 max-w-4xl mx-auto py-10">
+    <div className="space-y-8 max-w-4xl mx-auto py-12">
       <div className="text-center space-y-4">
-        {/* (주)대산 메인 브랜드 대형 로고 */}
-        <div className="flex justify-center mb-2">
-          <img
-            src="/logo.png"
-            alt="(주)대산 로고"
-            className="h-20 sm:h-28 md:h-32 w-auto object-contain drop-shadow-md"
-          />
-        </div>
         <h1 className="text-4xl font-extrabold tracking-tight text-gray-900 sm:text-5xl">
           HRMM 직원 관리 및 마트 스케줄링
         </h1>
