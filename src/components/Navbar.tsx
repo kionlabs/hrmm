@@ -17,18 +17,18 @@ export default function Navbar() {
   return (
     <nav className="bg-white border-b border-gray-200 shadow-sm">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex justify-between h-16">
-          <div className="flex">
+        <div className="flex justify-between items-center h-20 sm:h-24 py-2">
+          <div className="flex items-center">
             <div className="flex-shrink-0 flex items-center">
               <Link href="/" className="flex items-center gap-2 group py-1">
                 <img
                   src="/logo.png"
                   alt="(주)대산 로고"
-                  className="h-8 sm:h-9 w-auto object-contain transition-transform group-hover:scale-105"
+                  className="h-14 sm:h-18 md:h-20 w-auto object-contain transition-transform group-hover:scale-105"
                 />
               </Link>
             </div>
-            <div className="hidden sm:ml-6 sm:flex sm:space-x-8">
+            <div className="hidden sm:ml-8 sm:flex sm:space-x-8 sm:h-full">
               {navItems.map((item) => {
                 const isActive =
                   item.href === '/'
