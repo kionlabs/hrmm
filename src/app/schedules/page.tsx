@@ -811,7 +811,7 @@ export default function SchedulesPage() {
     <div className="space-y-6">
       <div className="flex flex-col md:flex-row md:justify-between md:items-center border-b pb-4 gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-purple-600">실시간 스케줄러 & 주차별 대기방</h1>
+          <h1 className="text-2xl font-bold text-emerald-800">통합 일정</h1>
           <div className="text-sm text-gray-500 mt-1 space-y-1">
             <p>💻 **PC:** 대기방 인력을 드래그하여 배정하거나, 캘린더 카드를 드래그해 이동합니다. (동일 직원 다중 날짜 배정 가능)</p>
             <p>📱 **모바일:** 대기방 직원을 **선택(터치)** 후 원하는 칸을 **터치**하면 즉시 배정됩니다. 미배정 빈 셀의 <span className="text-red-600 font-bold">🚨 결원</span> 버튼을 누르면 긴급 인력을 빠른 투입할 수 있습니다.</p>

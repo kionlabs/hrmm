@@ -202,7 +202,7 @@ export default function ShareSchedulerPage() {
       <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center border-b pb-4 gap-4">
         <div>
           <div className="flex items-center space-x-2">
-            <h1 className="text-2xl font-bold text-amber-600">통합 스케줄 공유판</h1>
+            <h1 className="text-2xl font-bold text-emerald-800">통합 일정 공유판</h1>
             <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 animate-pulse">
               ● 실시간 동기화 중
             </span>

@@ -2,85 +2,57 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useState } from 'react';
+
+const navGroups = [
+  { label: '운영', items: [
+    { name: '대시보드', href: '/', icon: '▦' }, { name: '직원 관리', href: '/staffs', icon: '人' },
+    { name: '마트 관리', href: '/markets', icon: '店' }, { name: '행사 관리', href: '/events', icon: '旗' },
+    { name: '통합 일정', href: '/schedules', icon: '日' },
+  ] },
+  { label: '재무', items: [
+    { name: '매출 관리', href: '/revenues', icon: '₩' }, { name: '정산 관리', href: '/settlements', icon: '計' },
+    { name: '금융 관리', href: '/finance', icon: '銀' },
+  ] },
+  { label: '협업', items: [
+    { name: '사내 메신저', href: '/messenger', icon: '話' }, { name: 'AI 업무비서', href: '/assistant', icon: 'AI' },
+    { name: '일정 공유판', href: '/schedules/share', icon: '共' },
+  ] },
+];
 
 export default function Navbar() {
   const pathname = usePathname();
+  const [open, setOpen] = useState(false);
+  const active = (href: string) => href === '/' ? pathname === '/' : pathname?.startsWith(href);
 
-  const navItems = [
-    { name: '홈', href: '/' },
-    { name: '직원 관리', href: '/staffs' },
-    { name: '마트 관리', href: '/markets' },
-    { name: '실시간 스케줄', href: '/schedules' },
-    { name: '스케줄 공유판', href: '/schedules/share' },
-  ];
-
-  return (
-    <nav className="bg-white border-b border-gray-200 shadow-sm">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex justify-between items-center h-20 sm:h-24 py-2">
-          <div className="flex items-center">
-            <div className="flex-shrink-0 flex items-center">
-              <Link href="/" className="flex items-center gap-2 group py-1">
-                <img
-                  src="/logo.png"
-                  alt="(주)대산 로고"
-                  className="h-14 sm:h-18 md:h-20 w-auto object-contain transition-transform group-hover:scale-105"
-                />
-              </Link>
-            </div>
-            <div className="hidden sm:ml-8 sm:flex sm:space-x-8 sm:h-full">
-              {navItems.map((item) => {
-                const isActive =
-                  item.href === '/'
-                    ? pathname === '/'
-                    : pathname?.startsWith(item.href);
-
-                return (
-                  <Link
-                    key={item.href}
-                    href={item.href}
-                    className={`inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium transition-colors ${
-                      isActive
-                        ? 'border-blue-500 text-gray-900'
-                        : 'border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700'
-                    }`}
-                  >
-                    {item.name}
-                  </Link>
-                );
-              })}
-            </div>
-          </div>
-          <div className="flex items-center">
-            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-              관리자 모드
-            </span>
-          </div>
-        </div>
+  return <>
+    <header className="fixed inset-x-0 top-0 z-40 flex h-16 items-center justify-between border-b border-gray-200 bg-white px-4 lg:hidden">
+      <Link href="/" className="flex items-center gap-2" onClick={() => setOpen(false)}>
+        <img src="/logo.png" alt="대산유통" className="h-10 w-auto object-contain" /><span className="text-sm font-bold">통합 ERP</span>
+      </Link>
+      <button type="button" aria-label="메뉴 열기" onClick={() => setOpen(!open)} className="h-10 w-10 border border-gray-300 bg-white text-xl text-gray-700">{open ? '×' : '☰'}</button>
+    </header>
+    {open && <button aria-label="메뉴 닫기" className="fixed inset-0 z-40 bg-black/35 lg:hidden" onClick={() => setOpen(false)} />}
+    <aside className={`fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-emerald-950 bg-[#103a26] text-white transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0 ${open ? 'translate-x-0' : '-translate-x-full'}`}>
+      <div className="flex h-20 items-center border-b border-white/10 px-5">
+        <Link href="/" className="flex items-center gap-3" onClick={() => setOpen(false)}>
+          <div className="flex h-11 w-11 items-center justify-center bg-white p-1"><img src="/logo.png" alt="대산유통" className="max-h-full object-contain" /></div>
+          <div><strong className="block text-base">대산유통</strong><span className="text-xs text-emerald-100">통합 ERP MVP</span></div>
+        </Link>
       </div>
-      {/* 모바일 네비게이션 */}
-      <div className="sm:hidden border-t border-gray-200 bg-gray-50 flex justify-around py-2">
-        {navItems.map((item) => {
-          const isActive =
-            item.href === '/'
-              ? pathname === '/'
-              : pathname?.startsWith(item.href);
-
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`text-xs font-medium py-1 px-3 rounded-md transition-colors ${
-                isActive
-                  ? 'bg-blue-100 text-blue-700'
-                  : 'text-gray-600 hover:bg-gray-100'
-              }`}
-            >
-              {item.name}
-            </Link>
-          );
-        })}
-      </div>
-    </nav>
-  );
+      <nav className="flex-1 overflow-y-auto px-3 py-4">
+        {navGroups.map((group) => <div key={group.label} className="mb-5">
+          <p className="mb-2 px-3 text-[11px] font-bold uppercase text-emerald-200/70">{group.label}</p>
+          <div className="space-y-1">{group.items.map((item) => <Link key={item.href} href={item.href} onClick={() => setOpen(false)} className={`flex min-h-10 items-center gap-3 px-3 py-2 text-sm transition-colors ${active(item.href) ? 'bg-white text-[#103a26]' : 'text-emerald-50 hover:bg-white/10'}`}>
+            <span aria-hidden className="flex h-6 w-6 items-center justify-center border border-current/25 text-[11px] font-bold">{item.icon}</span><span className="font-medium">{item.name}</span>
+          </Link>)}</div>
+        </div>)}
+      </nav>
+      <div className="border-t border-white/10 p-4"><div className="flex items-center gap-3">
+        <div className="flex h-9 w-9 items-center justify-center bg-emerald-800 text-xs font-bold">관리</div>
+        <div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold">관리자 데모</p><p className="text-[11px] text-emerald-200">Auth 연결 전</p></div>
+        <span className="h-2 w-2 bg-amber-400" title="데모 모드" />
+      </div></div>
+    </aside>
+  </>;
 }
