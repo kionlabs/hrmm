@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { supabase } from '@/lib/supabase/client';
+import { WorkflowNav } from '@/components/erp-ui';
 
 interface Staff {
   id: string;
@@ -838,6 +839,8 @@ export default function SchedulesPage() {
           </button>
         </div>
       </div>
+
+      <WorkflowNav current="통합 일정" />
 
       {error && (
         <div className="bg-red-50 border-l-4 border-red-400 p-4 rounded-md flex justify-between items-center">

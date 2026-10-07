@@ -16,5 +16,22 @@ export function EmptyState({ title, description, href, action }: { title: string
 }
 
 export function DemoNotice({ children }: { children: React.ReactNode }) {
-  return <div className="mb-5 border-l-4 border-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-900"><strong className="mr-2">MVP 데모</strong>{children}</div>;
+  return <div className="mb-5 border border-amber-300 border-l-4 border-l-amber-500 bg-amber-50 px-4 py-3 text-sm text-amber-950"><strong className="mr-2 inline-flex bg-amber-200 px-2 py-0.5 text-xs">MVP · 연동 예정</strong>{children}</div>;
+}
+
+const workflowItems = [
+  { label: '행사', href: '/events' },
+  { label: '통합 일정', href: '/schedules' },
+  { label: '매출', href: '/revenues' },
+  { label: '정산', href: '/settlements' },
+];
+
+export function WorkflowNav({ current }: { current: '행사' | '통합 일정' | '매출' | '정산' }) {
+  return <nav aria-label="ERP 업무 흐름" className="mb-5 flex flex-wrap items-center border border-gray-200 bg-white px-4 py-3">
+    <span className="mr-4 text-xs font-bold text-gray-500">업무 흐름</span>
+    {workflowItems.map((item, index) => <span key={item.href} className="flex items-center">
+      {index > 0 && <span className="mx-2 text-gray-300">→</span>}
+      <Link href={item.href} className={`px-2 py-1 text-sm font-bold ${current === item.label ? 'bg-emerald-800 text-white' : 'text-gray-600 hover:bg-emerald-50 hover:text-emerald-800'}`}>{item.label}</Link>
+    </span>)}
+  </nav>;
 }

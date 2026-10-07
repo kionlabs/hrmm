@@ -34,18 +34,20 @@ export default function DashboardPage() {
     const now = new Date(); const today = dateKey(now); const weekEnd = new Date(now); weekEnd.setDate(now.getDate() + 7); const month = today.slice(0, 7);
     const active = schedules.filter((s) => { const start = s.start_date || s.schedule_date || ''; const end = s.end_date || s.schedule_date || start; return start <= today && end >= today; });
     const week = schedules.filter((s) => { const start = s.start_date || s.schedule_date || ''; return start >= today && start <= dateKey(weekEnd); });
+    const confirmed = schedules.filter((s) => s.status !== 'completed').length;
     const monthRevenue = schedules.filter((s) => (s.start_date || s.schedule_date || '').startsWith(month)).reduce((sum, s) => sum + (s.weekly_revenue || 0), 0);
-    return { active, week, monthRevenue };
+    return { active, week, confirmed, monthRevenue };
   }, [schedules]);
 
   return <div>
     <PageHeader eyebrow="DAESAN OPERATIONS" title="대산유통 통합 ERP" description="행사 일정과 현장 운영 정보를 한 화면에서 확인합니다." action={<div className="flex items-center gap-2 text-xs"><span className={`h-2 w-2 ${connected ? 'bg-emerald-500' : 'bg-red-500'}`} /><span className="font-semibold text-gray-600">{connected ? '데이터 연결됨' : '연결 확인 필요'}</span></div>} />
-    <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+    <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
       {[
-        ['이번 주 행사', `${metrics.week.length}건`, '예정 및 진행 일정', '/schedules'],
-        ['진행 중 행사', `${metrics.active.length}건`, '오늘 기준', '/events'],
-        ['이번 달 등록 매출', formatMoney(metrics.monthRevenue), '기존 일정 매출 기준', '/revenues'],
-        ['정산 대기', '-', '정산 DB 연결 전', '/settlements'],
+        ['오늘 / 이번 주 행사', `${metrics.active.length} / ${metrics.week.length}건`, '오늘 진행 / 7일 이내', '/schedules'],
+        ['확정 행사', `${metrics.confirmed}건`, '기존 배정 상태 기준', '/events'],
+        ['이번 달 매출', formatMoney(metrics.monthRevenue), '등록된 일정 매출 기준', '/revenues'],
+        ['미정산 건수·금액', '-', '정산 DB 연결 전', '/settlements'],
+        ['매출 처리 대기', '-', '업로드 처리 DB 연결 전', '/revenues'],
       ].map(([label, value, note, href]) => <Link href={href} key={label} className="border border-gray-200 bg-white p-5 hover:border-emerald-600">
         <p className="text-xs font-bold text-gray-500">{label}</p><p className="mt-2 text-2xl font-bold text-gray-950">{loading ? '...' : value}</p><p className="mt-1 text-xs text-gray-500">{note}</p>
       </Link>)}
