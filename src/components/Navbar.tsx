@@ -7,6 +7,7 @@ import { useState } from 'react';
 const navGroups = [
   { label: '운영', items: [
     { name: '대시보드', href: '/', icon: '▦' }, { name: '직원 관리', href: '/staffs', icon: '人' },
+    { name: '팀 관리', href: '/teams', icon: '組' },
     { name: '마트 관리', href: '/markets', icon: '店' }, { name: '행사 관리', href: '/events', icon: '旗' },
     { name: '통합 일정', href: '/schedules', icon: '日' },
   ] },
