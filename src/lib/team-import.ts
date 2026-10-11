@@ -9,26 +9,23 @@ export type ParsedTeamRow = {
   powerUsageKw: number | null;
 };
 
-export type TeamRecord = { id: string; team_name: string; normalized_name: string };
-export type MemberRecord = ParsedTeamRow & {
+export type BaselineTeamRow = ParsedTeamRow & {
   id: string;
-  team_id: string;
-  source_key: string;
-  normalized_name: string | null;
-  normalized_phone: string | null;
-  team?: TeamRecord;
+  teamId: string;
+  sourceKey: string;
+  normalizedTeam: string;
+  normalizedMember: string;
+  normalizedPhone: string;
+  normalizedCompany: string;
 };
 
 export type ImportStatus = 'new' | 'changed' | 'same' | 'duplicate' | 'review';
 export type ComparedTeamRow = ParsedTeamRow & {
   status: ImportStatus;
-  selected: boolean;
   sourceKey: string;
-  existingTeamId?: string;
+  existing?: ParsedTeamRow;
   existingMemberId?: string;
-  existing?: Partial<ParsedTeamRow>;
   reason?: string;
-  importRowId?: string;
 };
 
 export const normalizeText = (value: unknown) => String(value ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
@@ -36,23 +33,13 @@ export const normalizePhone = (value: unknown) => String(value ?? '').replace(/\
 export const makeSourceKey = (team: string, member: string, phone: string) =>
   `${normalizeText(team)}|${normalizeText(member)}|${normalizePhone(phone)}`;
 
-const cellText = (value: unknown): string => {
-  if (value == null) return '';
-  if (typeof value === 'object') {
-    if ('text' in value && typeof value.text === 'string') return value.text.trim();
-    if ('result' in value) return cellText(value.result);
-    if ('richText' in value && Array.isArray(value.richText)) return value.richText.map((item: { text?: string }) => item.text || '').join('').trim();
-  }
-  return String(value).trim();
-};
-
+const cellText = (value: unknown): string => value == null ? '' : String(value).trim();
 const parseNumber = (value: unknown, percent = false): number | null => {
   if (typeof value === 'number' && Number.isFinite(value)) return percent && value > 1 ? value / 100 : value;
   const text = cellText(value).replace(/,/g, '').replace(/%/g, '');
   if (!text) return null;
   const parsed = Number(text);
-  if (!Number.isFinite(parsed)) return null;
-  return percent ? parsed / 100 : parsed;
+  return Number.isFinite(parsed) ? (percent ? parsed / 100 : parsed) : null;
 };
 
 export async function parseTeamWorkbook(file: File): Promise<ParsedTeamRow[]> {
@@ -68,33 +55,27 @@ export async function parseTeamWorkbook(file: File): Promise<ParsedTeamRow[]> {
   const columns = new Map<string, number>();
   for (let rowNumber = 1; rowNumber <= Math.min(sheet.length, 20); rowNumber += 1) {
     const row = sheet[rowNumber - 1] || [];
-    row.forEach((value, zeroBasedColumn) => {
+    row.forEach((value, index) => {
       const header = cellText(value).replace(/\s/g, '');
-      if (['팀명', '분류', '성명', '연락처', '업체명', '수수료율', '전기사용량(Kw)', '전기사용량'].includes(header)) columns.set(header, zeroBasedColumn + 1);
+      if (['팀명', '분류', '성명', '연락처', '업체명', '수수료율', '전기사용량(Kw)', '전기사용량'].includes(header)) columns.set(header, index);
     });
     if (columns.has('팀명') && columns.has('성명') && columns.has('연락처')) { headerRow = rowNumber; break; }
     columns.clear();
   }
   if (!headerRow) throw new Error('팀리스트의 필수 헤더(팀명, 성명, 연락처)를 찾을 수 없습니다.');
 
-  const col = (...names: string[]) => names.map((name) => columns.get(name)).find(Boolean);
+  const col = (...names: string[]) => names.map((name) => columns.get(name)).find((value) => value !== undefined);
   const rows: ParsedTeamRow[] = [];
   for (let rowNumber = headerRow + 1; rowNumber <= sheet.length; rowNumber += 1) {
     const row = sheet[rowNumber - 1] || [];
-    const get = (...names: string[]) => {
-      const index = col(...names);
-      return index ? row[index - 1] : null;
-    };
+    const get = (...names: string[]) => { const index = col(...names); return index === undefined ? null : row[index]; };
     const teamName = cellText(get('팀명'));
     const memberName = cellText(get('성명'));
     const contact = cellText(get('연락처'));
     if (!teamName && !memberName && !contact) continue;
     rows.push({
-      rowNumber,
-      teamName,
+      rowNumber, teamName, memberName, contact,
       category: cellText(get('분류')),
-      memberName,
-      contact,
       companyName: cellText(get('업체명')),
       commissionRate: parseNumber(get('수수료율'), true),
       powerUsageKw: parseNumber(get('전기사용량(Kw)', '전기사용량')),
@@ -109,41 +90,56 @@ const comparable = (row: Partial<ParsedTeamRow>) => ({
   contact: normalizePhone(row.contact), companyName: normalizeText(row.companyName),
   commissionRate: row.commissionRate ?? null, powerUsageKw: row.powerUsageKw ?? null,
 });
+const asExisting = (row: BaselineTeamRow): ParsedTeamRow => ({
+  rowNumber: row.rowNumber, teamName: row.teamName, category: row.category, memberName: row.memberName,
+  contact: row.contact, companyName: row.companyName, commissionRate: row.commissionRate, powerUsageKw: row.powerUsageKw,
+});
 
-export function compareTeamRows(rows: ParsedTeamRow[], teams: TeamRecord[], members: MemberRecord[]): ComparedTeamRow[] {
-  const duplicateKeys = new Set<string>();
-  const counts = new Map<string, number>();
-  rows.forEach((row) => { const key = makeSourceKey(row.teamName, row.memberName, row.contact); counts.set(key, (counts.get(key) || 0) + 1); });
-  counts.forEach((count, key) => { if (count > 1) duplicateKeys.add(key); });
+export function compareTeamRows(rows: ParsedTeamRow[], baseline: BaselineTeamRow[]): ComparedTeamRow[] {
+  const inputCounts = new Map<string, number>();
+  rows.forEach((row) => { const key = makeSourceKey(row.teamName, row.memberName, row.contact); inputCounts.set(key, (inputCounts.get(key) || 0) + 1); });
 
   return rows.map((row) => {
-    const sourceKey = makeSourceKey(row.teamName, row.memberName, row.contact);
     const normalizedTeam = normalizeText(row.teamName);
     const normalizedMember = normalizeText(row.memberName);
     const normalizedContact = normalizePhone(row.contact);
-    if (!normalizedTeam || !normalizedMember || !normalizedContact) {
-      return { ...row, sourceKey, status: 'review', selected: false, reason: '팀명, 성명 또는 연락처가 비어 있습니다.' };
+    const normalizedCompany = normalizeText(row.companyName);
+    const sourceKey = makeSourceKey(row.teamName, row.memberName, row.contact);
+    if (!normalizedTeam || !normalizedMember || !normalizedContact) return { ...row, sourceKey, status: 'review', reason: '팀명, 성명 또는 연락처가 비어 있습니다.' };
+    if ((inputCounts.get(sourceKey) || 0) > 1) return { ...row, sourceKey, status: 'duplicate', reason: '업로드 파일 안에 같은 팀·담당자·연락처가 반복됩니다.' };
+
+    const exact = baseline.filter((item) => item.sourceKey === sourceKey);
+    if (exact.length > 1) return { ...row, sourceKey, status: 'duplicate', reason: '기준 데이터에 같은 식별값이 여러 건 존재합니다.' };
+    if (exact.length === 1) {
+      const existing = asExisting(exact[0]);
+      const changed = JSON.stringify(comparable(existing)) !== JSON.stringify(comparable(row));
+      return { ...row, sourceKey, status: changed ? 'changed' : 'same', existing, existingMemberId: exact[0].id };
     }
-    if (duplicateKeys.has(sourceKey)) {
-      return { ...row, sourceKey, status: 'duplicate', selected: false, reason: '업로드 파일 안에 같은 팀·담당자·연락처가 반복됩니다.' };
+
+    const scored = baseline.map((item) => {
+      const signals = [item.normalizedTeam === normalizedTeam ? 4 : 0, item.normalizedPhone === normalizedContact ? 4 : 0,
+        item.normalizedMember === normalizedMember ? 3 : 0, normalizedCompany && item.normalizedCompany === normalizedCompany ? 2 : 0];
+      return { item, score: signals.reduce((sum, value) => sum + value, 0), signalCount: signals.filter(Boolean).length };
+    }).filter((candidate) => candidate.score > 0).sort((a, b) => b.score - a.score);
+    const best = scored[0];
+    const tied = best ? scored.filter((candidate) => candidate.score === best.score) : [];
+    if (best && best.score >= 7 && best.signalCount >= 2 && tied.length === 1) {
+      return { ...row, sourceKey, status: 'changed', existing: asExisting(best.item), existingMemberId: best.item.id };
     }
-    const team = teams.find((item) => item.normalized_name === normalizedTeam);
-    const exact = members.find((item) => item.source_key === sourceKey);
-    const sameTeamCandidate = members.find((item) => item.team_id === team?.id && (item.normalized_name === normalizedMember || item.normalized_phone === normalizedContact));
-    const crossCandidate = members.find((item) => item.normalized_phone === normalizedContact || (item.normalized_name === normalizedMember && normalizedMember.length >= 2));
-    const existing = exact || sameTeamCandidate;
-    if (existing) {
-      const oldValue: Partial<ParsedTeamRow> = {
-        teamName: existing.team?.team_name || team?.team_name || row.teamName,
-        category: existing.category, memberName: existing.memberName, contact: existing.contact,
-        companyName: existing.companyName, commissionRate: existing.commissionRate, powerUsageKw: existing.powerUsageKw,
-      };
-      const changed = JSON.stringify(comparable(oldValue)) !== JSON.stringify(comparable(row));
-      return { ...row, sourceKey, status: changed ? 'changed' : 'same', selected: changed, existing: oldValue, existingTeamId: existing.team_id, existingMemberId: existing.id };
-    }
-    if (crossCandidate) {
-      return { ...row, sourceKey, status: 'duplicate', selected: false, reason: '다른 팀 또는 기존 담당자와 성명·연락처가 겹칩니다.', existingTeamId: crossCandidate.team_id, existingMemberId: crossCandidate.id };
-    }
-    return { ...row, sourceKey, status: 'new', selected: true, existingTeamId: team?.id };
+    if (best && (tied.length > 1 || best.score >= 4)) return { ...row, sourceKey, status: 'review', reason: '여러 기준 행과 일부 식별값이 겹쳐 자동 연결할 수 없습니다.' };
+    const crossIdentity = scored.some((candidate) => candidate.item.normalizedPhone === normalizedContact || candidate.item.normalizedMember === normalizedMember);
+    if (crossIdentity) return { ...row, sourceKey, status: 'duplicate', reason: '다른 팀의 담당자 또는 연락처와 겹칩니다.' };
+    return { ...row, sourceKey, status: 'new' };
   });
+}
+
+export function changedFields(row: ComparedTeamRow) {
+  if (!row.existing) return [];
+  const fields: Array<[string, unknown, unknown]> = [
+    ['팀명', row.existing.teamName, row.teamName], ['분류', row.existing.category, row.category],
+    ['담당자', row.existing.memberName, row.memberName], ['연락처', row.existing.contact, row.contact],
+    ['업체명', row.existing.companyName, row.companyName], ['수수료율', row.existing.commissionRate, row.commissionRate],
+    ['전기사용량', row.existing.powerUsageKw, row.powerUsageKw],
+  ];
+  return fields.filter(([, before, after]) => String(before ?? '') !== String(after ?? ''));
 }
