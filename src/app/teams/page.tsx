@@ -1,6 +1,6 @@
 'use client';
 
-import { Fragment, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { PageHeader, StatusBadge } from '@/components/erp-ui';
 import { changedFields, parseTeamWorkbook, type ComparedTeamRow, type ImportStatus } from '@/lib/team-import';
 
@@ -12,16 +12,45 @@ const display = (value: unknown) => value === null || value === undefined || val
 const percent = (value: number | null | undefined) => value == null ? '-' : `${(value * 100).toFixed(value * 100 % 1 ? 1 : 0)}%`;
 const formatDiff = (label: string, value: unknown) => label === '수수료율' ? percent(value as number | null) : label === '전기사용량' && value != null ? `${value}kW` : display(value);
 
+type DbTeam = {
+  id: string;
+  teamName: string;
+  categories: string[];
+  members: Array<{
+    id: string; name: string; contact: string; category: string; companyName: string;
+    commissionRate: number | null; powerUsageKw: number | null; needsReview: boolean;
+  }>;
+};
+
 export default function TeamsPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [rows, setRows] = useState<ComparedTeamRow[]>([]);
-  const [baseline, setBaseline] = useState({ teams: 0, members: 0 });
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [fileName, setFileName] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | ImportStatus>('all');
   const [expandedRow, setExpandedRow] = useState<number | null>(null);
+  const [dbTeams, setDbTeams] = useState<DbTeam[]>([]);
+  const [dbSummary, setDbSummary] = useState({ teams: 0, members: 0, reviewRequired: 0 });
+  const [dbLoading, setDbLoading] = useState(true);
+  const [dbError, setDbError] = useState<string | null>(null);
+  const [teamSearch, setTeamSearch] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState('all');
+  const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    fetch('/api/teams/compare', { cache: 'no-store' })
+      .then(async (response) => {
+        const result = await response.json() as { teams?: DbTeam[]; summary?: typeof dbSummary; error?: string };
+        if (!response.ok || !result.teams || !result.summary) throw new Error(result.error || '팀 목록을 불러오지 못했습니다.');
+        if (active) { setDbTeams(result.teams); setDbSummary(result.summary); }
+      })
+      .catch((caught) => active && setDbError(caught instanceof Error ? caught.message : '팀 목록을 불러오지 못했습니다.'))
+      .finally(() => active && setDbLoading(false));
+    return () => { active = false; };
+  }, []);
 
   const summary = useMemo(() => ({
     all: rows.length, new: rows.filter((row) => row.status === 'new').length,
@@ -29,9 +58,19 @@ export default function TeamsPage() {
     duplicate: rows.filter((row) => row.status === 'duplicate').length, review: rows.filter((row) => row.status === 'review').length,
   }), [rows]);
   const filteredRows = rows.filter((row) => statusFilter === 'all' || row.status === statusFilter);
+  const categories = useMemo(() => Array.from(new Set(dbTeams.flatMap((team) => team.categories))).sort((a, b) => a.localeCompare(b, 'ko')), [dbTeams]);
+  const visibleTeams = useMemo(() => {
+    const query = teamSearch.trim().toLocaleLowerCase('ko');
+    return dbTeams.filter((team) => {
+      const matchesCategory = categoryFilter === 'all' || team.categories.includes(categoryFilter);
+      const haystack = [team.teamName, ...team.members.flatMap((member) => [member.name, member.companyName])].join(' ').toLocaleLowerCase('ko');
+      return matchesCategory && (!query || haystack.includes(query));
+    });
+  }, [categoryFilter, dbTeams, teamSearch]);
+  const selectedTeam = dbTeams.find((team) => team.id === selectedTeamId) || null;
 
   const resetImport = () => {
-    setRows([]); setBaseline({ teams: 0, members: 0 }); setFileName(''); setStatusFilter('all');
+    setRows([]); setFileName(''); setStatusFilter('all');
     setExpandedRow(null); setNotice(null); setError(null);
     if (inputRef.current) inputRef.current.value = '';
   };
@@ -49,7 +88,7 @@ export default function TeamsPage() {
       });
       const result = await response.json() as { rows?: ComparedTeamRow[]; baseline?: { teams: number; members: number }; error?: string };
       if (!response.ok || !result.rows || !result.baseline) throw new Error(result.error || '기준 데이터 비교에 실패했습니다.');
-      setRows(result.rows); setBaseline(result.baseline); setFileName(file.name);
+      setRows(result.rows); setFileName(file.name);
       setNotice(`${result.rows.length}개 행을 파싱하고 DB 기준 데이터와 비교했습니다. 원본 파일과 비교 결과는 저장하지 않습니다.`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Excel 처리 중 오류가 발생했습니다.');
@@ -62,14 +101,36 @@ export default function TeamsPage() {
     {notice && <div className="mb-4 border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">{notice}</div>}
 
     <section className="mb-6 grid gap-3 sm:grid-cols-3">
-      <Metric label="기준 등록 팀" value={baseline.teams ? `${baseline.teams}개` : '-'} />
-      <Metric label="기준 담당자 행" value={baseline.members ? `${baseline.members}건` : '-'} />
-      <Metric label="중복/확인 필요" value={`${summary.duplicate + summary.review}건`} warning={summary.duplicate + summary.review > 0} />
+      <Metric label="현재 팀 수" value={dbLoading ? '조회 중' : `${dbSummary.teams}개`} />
+      <Metric label="담당자 수" value={dbLoading ? '조회 중' : `${dbSummary.members}명`} />
+      <Metric label="확인 필요" value={dbLoading ? '조회 중' : `${dbSummary.reviewRequired}건`} warning={dbSummary.reviewRequired > 0} />
+    </section>
+
+    <section className="mb-6 border border-gray-200 bg-white">
+      <div className="border-b border-gray-200 p-5">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+          <div><h2 className="font-bold text-gray-950">현재 DB 팀 목록</h2><p className="mt-1 text-sm text-gray-500">Supabase 기준 데이터를 읽기 전용으로 표시합니다. 연락처는 서버에서 마스킹됩니다.</p></div>
+          <div className="grid gap-2 sm:grid-cols-[minmax(220px,1fr)_180px]">
+            <input aria-label="팀 검색" value={teamSearch} onChange={(event) => setTeamSearch(event.target.value)} placeholder="팀명, 담당자, 업체명 검색" className="h-10 border border-gray-300 px-3 text-sm outline-none focus:border-emerald-700" />
+            <select aria-label="분류 필터" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)} className="h-10 border border-gray-300 bg-white px-3 text-sm outline-none focus:border-emerald-700"><option value="all">전체 분류</option>{categories.map((category) => <option key={category} value={category}>{category}</option>)}</select>
+          </div>
+        </div>
+      </div>
+      {dbError ? <div className="p-8 text-center text-sm text-red-700">{dbError}</div> : dbLoading ? <div className="p-8 text-center text-sm text-gray-500">팀 데이터를 불러오는 중입니다.</div> : <div className="grid min-h-[360px] lg:grid-cols-[minmax(0,1fr)_380px]">
+        <div className="overflow-x-auto lg:border-r lg:border-gray-200">
+          <table className="w-full min-w-[620px] text-sm"><thead className="bg-gray-50 text-left text-xs text-gray-500"><tr><th className="px-4 py-3">팀명</th><th className="px-4 py-3">분류</th><th className="px-4 py-3">담당자</th><th className="px-4 py-3">업체</th><th className="px-4 py-3">상태</th></tr></thead><tbody className="divide-y divide-gray-100">{visibleTeams.map((team) => {
+            const needsReview = team.members.some((member) => member.needsReview);
+            return <tr key={team.id} onClick={() => setSelectedTeamId(team.id)} className={`cursor-pointer hover:bg-emerald-50 ${selectedTeamId === team.id ? 'bg-emerald-50' : ''}`}><td className="px-4 py-3 font-bold text-gray-950">{team.teamName}</td><td className="px-4 py-3">{team.categories.join(', ') || '-'}</td><td className="px-4 py-3">{team.members.length}명</td><td className="max-w-[220px] truncate px-4 py-3">{Array.from(new Set(team.members.map((member) => member.companyName).filter((name) => name !== '-'))).join(', ') || '-'}</td><td className="px-4 py-3"><StatusBadge tone={needsReview ? 'amber' : 'green'}>{needsReview ? '확인 필요' : '정상'}</StatusBadge></td></tr>;
+          })}{visibleTeams.length === 0 && <tr><td colSpan={5} className="p-10 text-center text-gray-500">검색 조건에 맞는 팀이 없습니다.</td></tr>}</tbody></table>
+        </div>
+        <aside className="p-5">{selectedTeam ? <><div className="border-b border-gray-200 pb-4"><p className="text-xs font-bold text-emerald-700">팀 상세</p><h3 className="mt-1 text-xl font-bold text-gray-950">{selectedTeam.teamName}</h3><p className="mt-1 text-sm text-gray-500">{selectedTeam.categories.join(', ') || '분류 미등록'} · 담당자 {selectedTeam.members.length}명</p></div><div className="mt-4 space-y-3">{selectedTeam.members.map((member) => <div key={member.id} className="border border-gray-200 p-3"><div className="flex items-center justify-between gap-2"><strong>{member.name}</strong>{member.needsReview && <StatusBadge tone="amber">확인 필요</StatusBadge>}</div><dl className="mt-2 grid grid-cols-[76px_1fr] gap-y-1 text-xs"><dt className="text-gray-500">연락처</dt><dd>{member.contact}</dd><dt className="text-gray-500">업체명</dt><dd>{member.companyName}</dd><dt className="text-gray-500">분류</dt><dd>{member.category}</dd><dt className="text-gray-500">수수료율</dt><dd>{percent(member.commissionRate)}</dd><dt className="text-gray-500">전기사용량</dt><dd>{member.powerUsageKw == null ? '-' : `${member.powerUsageKw}kW`}</dd></dl></div>)}</div></> : <div className="flex min-h-[280px] items-center justify-center text-center text-sm text-gray-500">목록에서 팀을 선택하면<br />담당자 상세를 확인할 수 있습니다.</div>}</aside>
+      </div>}
+      <div className="border-t border-gray-200 bg-gray-50 px-5 py-3 text-xs text-gray-500">총 {visibleTeams.length}개 팀 표시 · 확인 필요는 담당자명, 연락처 또는 분류가 비어 있는 행입니다.</div>
     </section>
 
     <section className="mb-6 border border-gray-200 bg-white">
       <div className="flex flex-col gap-4 border-b border-gray-200 p-5 lg:flex-row lg:items-center lg:justify-between">
-        <div><h2 className="font-bold text-gray-950">최신 행사관리 Excel 업로드</h2><p className="mt-1 text-sm text-gray-500">브라우저에서 `팀리스트`만 읽고, 필요한 업무 필드만 서버 비교 API로 전달합니다. 매크로는 실행하지 않습니다.</p></div>
+        <div><h2 className="font-bold text-gray-950">최신 행사관리 Excel 업로드</h2><p className="mt-1 text-sm text-gray-500">현재 DB 목록을 확인한 뒤 최신 파일을 비교합니다. 브라우저에서는 `팀리스트`의 허용 필드만 읽고 매크로는 실행하지 않습니다.</p></div>
         <div className="flex flex-wrap gap-2">{rows.length > 0 && <button type="button" onClick={resetImport} className="border border-gray-300 bg-white px-4 py-2 text-sm font-bold text-gray-700">결과 닫기</button>}<label className={`inline-flex cursor-pointer items-center bg-emerald-700 px-4 py-2 text-sm font-bold text-white ${processing ? 'pointer-events-none opacity-60' : ''}`}>{processing ? '파싱 및 비교 중...' : 'Excel 파일 선택'}<input ref={inputRef} type="file" accept=".xlsx,.xlsm" className="hidden" onChange={(event) => handleFile(event.target.files?.[0])} /></label></div>
       </div>
       <div className="grid gap-3 p-5 text-sm md:grid-cols-3"><FlowStep number="1" title="업로드·파싱" description="팀리스트와 허용 필드만 추출" /><FlowStep number="2" title="DB 기준 비교" description="복합 식별값으로 자동 매칭" /><FlowStep number="3" title="변경 검토" description="상태와 필드별 차이 확인" /></div>
